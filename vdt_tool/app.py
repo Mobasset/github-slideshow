@@ -385,6 +385,32 @@ def _export_btn_style(bg=ACCENT):
     }
 
 
+def _empty_map_figure():
+    fig = go.Figure(go.Scattermapbox())
+    fig.update_layout(
+        mapbox={
+            "style": "carto-darkmatter",
+            "center": {"lat": 23.5880, "lon": 58.3829},
+            "zoom": 12,
+        },
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        margin={"l": 0, "r": 0, "t": 0, "b": 0},
+        showlegend=False,
+        annotations=[
+            {
+                "text": "Upload files or click <b>Load Demo Data</b>",
+                "xref": "paper", "yref": "paper",
+                "x": 0.5, "y": 0.5,
+                "showarrow": False,
+                "font": {"size": 16, "color": "#888888"},
+                "bgcolor": "rgba(26,26,46,0.7)",
+            }
+        ],
+    )
+    return fig
+
+
 # ─── Main content ─────────────────────────────────────────────────────────────
 
 def build_main_content():
@@ -539,32 +565,6 @@ app.layout = html.Div(
 
 
 # ─── Utility functions ────────────────────────────────────────────────────────
-
-def _empty_map_figure():
-    fig = go.Figure(go.Scattermapbox())
-    fig.update_layout(
-        mapbox={
-            "style": "carto-darkmatter",
-            "center": {"lat": 23.5880, "lon": 58.3829},
-            "zoom": 12,
-        },
-        paper_bgcolor=BG,
-        plot_bgcolor=BG,
-        margin={"l": 0, "r": 0, "t": 0, "b": 0},
-        showlegend=False,
-        annotations=[
-            {
-                "text": "Upload files or click <b>Load Demo Data</b>",
-                "xref": "paper", "yref": "paper",
-                "x": 0.5, "y": 0.5,
-                "showarrow": False,
-                "font": {"size": 16, "color": "#888888"},
-                "bgcolor": "rgba(26,26,46,0.7)",
-            }
-        ],
-    )
-    return fig
-
 
 def _df_from_store(data) -> pd.DataFrame:
     if not data:
