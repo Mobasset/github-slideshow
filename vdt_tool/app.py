@@ -11,9 +11,6 @@ import json
 import logging
 import os
 import sys
-import zipfile
-import tarfile
-import gzip
 
 # Ensure parsers/metrics/visualization are importable from this directory
 sys.path.insert(0, os.path.dirname(__file__))
@@ -26,10 +23,8 @@ from dash import dcc, html, Input, Output, State, callback_context, dash_table, 
 from dash.exceptions import PreventUpdate
 
 # ── Internal imports ──────────────────────────────────────────────────────────
-from parsers.gpeh_parser import parse_gpeh_bytes
-from parsers.ctum_parser import parse_ctum_bytes
 from parsers.l3_parser import parse_l3_bytes
-from parsers.events_parser import parse_events_bytes
+from parsers.events_parser import parse_events_bytes, parse_csv_events
 from parsers.gps_correlator import (
     parse_gps_bytes, correlate_gps_to_samples, apply_cell_centroid_positions
 )
@@ -142,19 +137,8 @@ def build_sidebar():
             section_header("Input Files"),
 
             dcc.Upload(
-                id="upload-celltrace",
-                children=html.Div(["Cell Trace ZIP/TAR/GPEH/CTUM"], style={"fontSize": "11px", "color": MUTED}),
-                style={
-                    "border": f"1px dashed {ACCENT}", "borderRadius": "4px",
-                    "padding": "6px 8px", "marginBottom": "5px",
-                    "textAlign": "center", "cursor": "pointer",
-                    "background": "rgba(15,52,96,0.3)",
-                },
-                multiple=True,
-            ),
-            dcc.Upload(
                 id="upload-l3",
-                children=html.Div(["L3 Log / .pcap"], style={"fontSize": "11px", "color": MUTED}),
+                children=html.Div(["4G/5G RRC Log / .pcap"], style={"fontSize": "11px", "color": MUTED}),
                 style={
                     "border": f"1px dashed {ACCENT}", "borderRadius": "4px",
                     "padding": "6px 8px", "marginBottom": "5px",
@@ -165,7 +149,7 @@ def build_sidebar():
             ),
             dcc.Upload(
                 id="upload-events",
-                children=html.Div(["Events File (CTR/CSV)"], style={"fontSize": "11px", "color": MUTED}),
+                children=html.Div(["Events CSV / Log (LTE · NR)"], style={"fontSize": "11px", "color": MUTED}),
                 style={
                     "border": f"1px dashed {ACCENT}", "borderRadius": "4px",
                     "padding": "6px 8px", "marginBottom": "5px",
@@ -605,83 +589,6 @@ def _decode_upload(contents: str, filename: str) -> bytes:
     return base64.b64decode(content_string)
 
 
-def _parse_bundle(data: bytes, filename: str) -> pd.DataFrame:
-    """
-    Auto-detect and parse an uploaded file bundle.
-    Handles ZIP/TAR archives containing GPEH, CTUM, or event files.
-    """
-    fname_lower = filename.lower()
-    frames = []
-
-    # ZIP archive
-    if fname_lower.endswith(".zip") or data[:2] == b"PK":
-        try:
-            with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                for name in zf.namelist():
-                    inner = zf.read(name)
-                    frames.append(_parse_single_file(inner, name))
-        except Exception as exc:
-            logger.warning("ZIP parse error %s: %s", filename, exc)
-
-    # TAR archive
-    elif fname_lower.endswith((".tar", ".tar.gz", ".tgz")):
-        try:
-            mode = "r:gz" if fname_lower.endswith((".tar.gz", ".tgz")) else "r:"
-            with tarfile.open(fileobj=io.BytesIO(data), mode=mode) as tf:
-                for member in tf.getmembers():
-                    if member.isfile():
-                        f = tf.extractfile(member)
-                        if f:
-                            inner = f.read()
-                            frames.append(_parse_single_file(inner, member.name))
-        except Exception as exc:
-            logger.warning("TAR parse error %s: %s", filename, exc)
-
-    else:
-        frames.append(_parse_single_file(data, filename))
-
-    frames = [f for f in frames if f is not None and not f.empty]
-    if not frames:
-        return pd.DataFrame()
-
-    return pd.concat(frames, ignore_index=True)
-
-
-def _parse_single_file(data: bytes, filename: str) -> pd.DataFrame:
-    """Detect file type and dispatch to correct parser."""
-    fname_lower = filename.lower()
-
-    # GPEH binary
-    if fname_lower.endswith(".gpb") or (data[:4] == b"\x00\x00\x00\x04"):
-        return parse_gpeh_bytes(data, source_file=filename)
-
-    # CTUM gzip XML
-    if fname_lower.endswith(".gz") or data[:2] == b"\x1f\x8b":
-        return parse_ctum_bytes(data, source_file=filename)
-
-    # ROP XML
-    if fname_lower.endswith(".xml") or data[:5] == b"<?xml":
-        return parse_ctum_bytes(data, source_file=filename)
-
-    # PCAP
-    if fname_lower.endswith((".pcap", ".pcapng")):
-        return parse_l3_bytes(data, filename=filename)
-
-    # L3 text log
-    if fname_lower.endswith((".log", ".txt")):
-        # Try events first, then L3
-        sample = data[:512].decode("utf-8", errors="replace")
-        if any(e in sample for e in ["HANDOVER", "RLF", "SCG_FAIL", "A3_TRIGGER"]):
-            return parse_events_bytes(data, filename=filename)
-        return parse_l3_bytes(data, filename=filename)
-
-    # CSV events
-    if fname_lower.endswith(".csv"):
-        return parse_events_bytes(data, filename=filename)
-
-    # Default: try events parser
-    return parse_events_bytes(data, filename=filename)
-
 
 def _apply_filters(df: pd.DataFrame, rsrp_thresh: float, cell_ids: list, techs: list) -> pd.DataFrame:
     if df.empty:
@@ -1030,12 +937,10 @@ def _build_kpi_panel(kpis: dict) -> list:
     Output("status-bar", "children"),
     Input("btn-demo", "n_clicks"),
     Input("btn-clear", "n_clicks"),
-    Input("upload-celltrace", "contents"),
     Input("upload-l3", "contents"),
     Input("upload-events", "contents"),
     Input("upload-gps", "contents"),
     Input("upload-cellmeta", "contents"),
-    State("upload-celltrace", "filename"),
     State("upload-l3", "filename"),
     State("upload-events", "filename"),
     State("upload-gps", "filename"),
@@ -1046,8 +951,8 @@ def _build_kpi_panel(kpis: dict) -> list:
 )
 def handle_data_load(
     demo_clicks, clear_clicks,
-    ct_contents, l3_contents, ev_contents, gps_contents, meta_contents,
-    ct_fnames, l3_fnames, ev_fnames, gps_fname, meta_fname,
+    l3_contents, ev_contents, gps_contents, meta_contents,
+    l3_fnames, ev_fnames, gps_fname, meta_fname,
     existing_samples, existing_meta,
 ):
     ctx = callback_context
@@ -1093,19 +998,7 @@ def handle_data_load(
         except Exception as e:
             logger.warning("GPS parse error: %s", e)
 
-    # Cell trace
-    if trigger == "upload-celltrace" and ct_contents:
-        for content, fname in zip(ct_contents, ct_fnames or [""]):
-            try:
-                raw = _decode_upload(content, fname)
-                f = _parse_bundle(raw, fname)
-                if not f.empty:
-                    frames.append(f)
-                    status_parts.append(f"{fname}: {len(f)} records")
-            except Exception as e:
-                logger.warning("CellTrace error %s: %s", fname, e)
-
-    # L3 logs
+    # L3 logs (4G/5G RRC)
     if trigger == "upload-l3" and l3_contents:
         for content, fname in zip(l3_contents, l3_fnames or [""]):
             try:

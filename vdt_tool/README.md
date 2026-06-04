@@ -20,18 +20,14 @@ Click **Load Demo Data** for an instant fully-populated demo over Muscat, Oman.
 
 | Type | Format | Notes |
 |------|--------|-------|
-| Cell Trace | GPEH `.gpb` binary | Ericsson OSS export |
-| Cell Trace | CTUM `.gz` gzip XML | Ericsson OSS export |
-| Cell Trace | ROP XML | 3GPP PM format |
-| Cell Trace | ZIP / TAR bundle | Auto-extracts and parses all contained files |
-| L3 Messages | `.pcap` / `.pcapng` | Wireshark capture (requires pyshark + tshark) |
-| L3 Messages | `.log` / `.txt` | Ericsson OSS RRC log export |
-| Events | CTR binary | GPEH-compatible |
-| Events | CSV export | Ericsson OSS event export tool |
-| GPS Track | CSV | Columns: `timestamp_ms`, `latitude`, `longitude` |
-| GPS Track | KML | Google Earth export |
-| GPS Track | GPX | Standard GPS exchange format |
-| Cell Metadata | CSV | See `data/cell_db.csv` for template |
+| L3 Messages | `.pcap` / `.pcapng` | Wireshark LTE/NR RRC capture (requires pyshark + tshark) |
+| L3 Messages | `.log` / `.txt` | Ericsson OSS RRC log — LTE RRCMeasurementReport, NR SCGFailure |
+| Events | `.csv` | Ericsson OSS event export (LTE/NR: HO, RLF, ERAB, SCG, A3/A5) |
+| Events | `.log` / `.txt` | Free-text event log |
+| GPS Track | `.csv` | Columns: `timestamp_ms`, `latitude`, `longitude` |
+| GPS Track | `.kml` | Google Earth export |
+| GPS Track | `.gpx` | Standard GPS exchange format |
+| Cell Metadata | `.csv` | See `data/cell_db.csv` for template |
 
 ---
 
