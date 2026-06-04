@@ -24,7 +24,7 @@ from dash.exceptions import PreventUpdate
 
 # ── Internal imports ──────────────────────────────────────────────────────────
 from parsers.l3_parser import parse_l3_bytes
-from parsers.events_parser import parse_events_bytes, parse_csv_events
+from parsers.events_parser import parse_events_bytes
 from parsers.gps_correlator import (
     parse_gps_bytes, correlate_gps_to_samples, apply_cell_centroid_positions
 )
@@ -346,16 +346,18 @@ def build_sidebar():
             section_header("Export"),
             html.Div(
                 [
-                    html.Button("CSV", id="btn-export-csv", style=_export_btn_style()),
-                    html.Button("GeoJSON", id="btn-export-geojson", style=_export_btn_style()),
-                    html.Button("KMZ", id="btn-export-kmz", style=_export_btn_style()),
-                    html.Button("PDF Report", id="btn-export-pdf", style=_export_btn_style("#e94560")),
+                    html.Button("CSV",       id="btn-export-csv",     style=_export_btn_style()),
+                    html.Button("GeoJSON",   id="btn-export-geojson", style=_export_btn_style()),
+                    html.Button("KMZ",       id="btn-export-kmz",     style=_export_btn_style()),
+                    html.Button("HTML Map",  id="btn-export-html",    style=_export_btn_style()),
+                    html.Button("PDF Report",id="btn-export-pdf",     style=_export_btn_style("#e94560")),
                 ],
                 style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "4px"},
             ),
             dcc.Download(id="download-csv"),
             dcc.Download(id="download-geojson"),
             dcc.Download(id="download-kmz"),
+            dcc.Download(id="download-html-map"),
             dcc.Download(id="download-pdf"),
 
             # Status bar
@@ -590,14 +592,42 @@ def _decode_upload(contents: str, filename: str) -> bytes:
 
 
 
-def _apply_filters(df: pd.DataFrame, rsrp_thresh: float, cell_ids: list, techs: list) -> pd.DataFrame:
+def _apply_filters(
+    df: pd.DataFrame,
+    rsrp_thresh: float,
+    cell_ids: list,
+    techs: list,
+    time_range: tuple = None,
+) -> pd.DataFrame:
     if df.empty:
         return df
     mask = pd.Series([True] * len(df), index=df.index)
+
     if "rsrp_dbm" in df.columns and rsrp_thresh > -140:
         mask &= df["rsrp_dbm"].fillna(-200) >= rsrp_thresh
+
     if cell_ids:
         mask &= df["cell_id"].astype(str).isin([str(c) for c in cell_ids])
+
+    if techs and "earfcn" in df.columns:
+        tech_mask = pd.Series([False] * len(df), index=df.index)
+        earfcn = df["earfcn"].fillna(0)
+        if "LTE" in techs:
+            # LTE EARFCN bands: 1–262143 (B1–B86, excluding NR ranges)
+            tech_mask |= (earfcn > 0) & (earfcn < 600000)
+        if "NR" in techs:
+            # NR ARFCN: 600000–3279165
+            tech_mask |= earfcn >= 600000
+        if "2G" in techs:
+            # GSM ARFCN: 0–1023
+            tech_mask |= (earfcn >= 0) & (earfcn <= 1023)
+        mask &= tech_mask
+
+    if time_range and len(time_range) == 2 and "timestamp_ms" in df.columns:
+        ts_min, ts_max = time_range
+        if ts_min is not None and ts_max is not None:
+            mask &= (df["timestamp_ms"] >= ts_min) & (df["timestamp_ms"] <= ts_max)
+
     return df[mask]
 
 
@@ -1083,10 +1113,11 @@ def update_kpi_panel(kpis_json):
     Input("tech-filter", "value"),
     Input("hex-resolution", "value"),
     Input("idw-resolution", "value"),
+    Input("store-time-filter", "data"),
 )
 def update_map(
     samples_data, meta_data, viz_mode, metric, overlays,
-    map_style, rsrp_thresh, cell_ids, techs, hex_res, idw_res,
+    map_style, rsrp_thresh, cell_ids, techs, hex_res, idw_res, time_filter,
 ):
     df = _df_from_store(samples_data)
     cell_meta = _df_from_store(meta_data)
@@ -1094,7 +1125,16 @@ def update_map(
     if df.empty:
         return _empty_map_figure()
 
-    df = _apply_filters(df, rsrp_thresh or -140, cell_ids or [], techs or [])
+    time_range = None
+    if time_filter:
+        try:
+            tr = json.loads(time_filter)
+            if tr.get("min") and tr.get("max"):
+                time_range = (tr["min"], tr["max"])
+        except Exception:
+            pass
+
+    df = _apply_filters(df, rsrp_thresh or -140, cell_ids or [], techs or [], time_range)
 
     return _build_map_figure(
         df, cell_meta, viz_mode or "dots", metric or "rsrp_dbm",
@@ -1296,6 +1336,193 @@ def export_pdf_download(n, samples_data, kpis_json):
     if not pdf_bytes:
         raise PreventUpdate
     return dcc.send_bytes(pdf_bytes, "vdt_report.pdf")
+
+
+@app.callback(
+    Output("store-time-filter", "data"),
+    Input("timeline-chart", "relayoutData"),
+    State("store-samples", "data"),
+    prevent_initial_call=True,
+)
+def sync_timeline_brush(relayout_data, samples_data):
+    """Translate Plotly rangeslider / zoom gestures into a time filter stored in ms."""
+    if not relayout_data:
+        raise PreventUpdate
+
+    # Plotly emits xaxis.range[0]/[1] when the user zooms/brushes the chart
+    x0 = relayout_data.get("xaxis.range[0]") or relayout_data.get("xaxis.range", [None, None])[0]
+    x1 = relayout_data.get("xaxis.range[1]") or (relayout_data.get("xaxis.range", [None, None]) + [None])[1]
+
+    # If user double-clicked to auto-range, clear the filter
+    if relayout_data.get("xaxis.autorange") or relayout_data.get("autosize"):
+        return json.dumps({})
+
+    if x0 is None or x1 is None:
+        raise PreventUpdate
+
+    try:
+        ts_min = int(pd.Timestamp(x0).timestamp() * 1000)
+        ts_max = int(pd.Timestamp(x1).timestamp() * 1000)
+    except Exception:
+        raise PreventUpdate
+
+    return json.dumps({"min": ts_min, "max": ts_max})
+
+
+@app.callback(
+    Output("timeline-container", "style"),
+    Output("btn-collapse-timeline", "children"),
+    Input("btn-collapse-timeline", "n_clicks"),
+    State("timeline-container", "style"),
+    prevent_initial_call=True,
+)
+def toggle_timeline(n_clicks, current_style):
+    if current_style and current_style.get("display") == "none":
+        return {"display": "block"}, "▼"
+    return {"display": "none"}, "▶"
+
+
+@app.callback(
+    Output("download-html-map", "data"),
+    Input("btn-export-html", "n_clicks"),
+    State("store-samples", "data"),
+    State("store-cellmeta", "data"),
+    State("metric-select", "value"),
+    prevent_initial_call=True,
+)
+def export_html_map(n, samples_data, meta_data, metric):
+    """Build a self-contained Folium HTML map and send as download."""
+    df = _df_from_store(samples_data)
+    if df.empty:
+        raise PreventUpdate
+
+    try:
+        import folium
+        from folium.plugins import HeatMap, MarkerCluster
+    except ImportError:
+        raise PreventUpdate
+
+    cell_meta = _df_from_store(meta_data)
+    center = get_map_center(df)
+
+    fmap = folium.Map(
+        location=[center[0], center[1]],
+        zoom_start=13,
+        tiles="CartoDB dark_matter",
+        control_scale=True,
+    )
+
+    # ── Colored dot layer ──────────────────────────────────────────────────
+    dot_group = folium.FeatureGroup(name="RSRP Samples", show=True)
+    mask = df["latitude"].notna() & df["longitude"].notna()
+    df_valid = df[mask]
+    if len(df_valid) > 5000:
+        df_valid = df_valid.sample(n=5000, random_state=42)
+
+    for _, row in df_valid.iterrows():
+        color = row.get("rsrp_color", "#888888")
+        rsrp = row.get("rsrp_dbm", float("nan"))
+        cell_id = row.get("cell_id", "")
+        tooltip = (
+            f"RSRP: {rsrp:.1f} dBm | Cell: {cell_id}"
+            if not (isinstance(rsrp, float) and np.isnan(rsrp))
+            else f"Cell: {cell_id}"
+        )
+        folium.CircleMarker(
+            location=[float(row["latitude"]), float(row["longitude"])],
+            radius=4,
+            color=color,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.75,
+            weight=0,
+            tooltip=tooltip,
+        ).add_to(dot_group)
+    dot_group.add_to(fmap)
+
+    # ── Heatmap layer ──────────────────────────────────────────────────────
+    from visualization.heatmap import build_heatmap_data
+    heat_data = build_heatmap_data(df, metric=metric or "rsrp_dbm")
+    if heat_data:
+        heat_group = folium.FeatureGroup(name=f"Heatmap ({metric})", show=False)
+        HeatMap(heat_data, radius=15, blur=20, min_opacity=0.3).add_to(heat_group)
+        heat_group.add_to(fmap)
+
+    # ── GPS track ─────────────────────────────────────────────────────────
+    if len(df_valid) >= 2:
+        track = df_valid.sort_values("timestamp_ms")
+        coords = list(zip(track["latitude"].tolist(), track["longitude"].tolist()))
+        if len(coords) > 2000:
+            step = len(coords) // 2000
+            coords = coords[::step]
+        track_group = folium.FeatureGroup(name="GPS Track", show=True)
+        folium.PolyLine(coords, color="#ffffaa", weight=2, opacity=0.5).add_to(track_group)
+        track_group.add_to(fmap)
+
+    # ── Event markers ─────────────────────────────────────────────────────
+    event_colors = {
+        "INTERNAL_HANDOVER_FAILURE": "red",
+        "RRC_RLF": "darkred",
+        "NR_SCG_FAILURE": "orange",
+        "INTERNAL_HANDOVER_SUCCESS": "green",
+        "A3_TRIGGER": "blue",
+        "A5_TRIGGER": "cadetblue",
+    }
+    if "event_type" in df.columns:
+        evt_group = folium.FeatureGroup(name="Events", show=True)
+        evt_cluster = MarkerCluster().add_to(evt_group)
+        emask = (
+            df["latitude"].notna() & df["longitude"].notna()
+            & df["event_type"].isin(event_colors.keys())
+        )
+        for _, row in df[emask].iterrows():
+            etype = row["event_type"]
+            folium.Marker(
+                location=[float(row["latitude"]), float(row["longitude"])],
+                icon=folium.Icon(color=event_colors.get(etype, "gray"), icon="info-sign"),
+                tooltip=etype.replace("INTERNAL_", ""),
+            ).add_to(evt_cluster)
+        evt_group.add_to(fmap)
+
+    # ── Sector wedges ─────────────────────────────────────────────────────
+    if not cell_meta.empty:
+        from visualization.sector_overlay import _build_wedge_polygon, DEFAULT_HPBW_DEG, DEFAULT_ISD_M
+        col_map = {}
+        for c in cell_meta.columns:
+            cl = c.lower().strip()
+            if cl in ("cellid", "cell_id"):
+                col_map[c] = "cell_id"
+            elif cl in ("lat", "latitude"):
+                col_map[c] = "lat"
+            elif cl in ("lon", "longitude"):
+                col_map[c] = "lon"
+            elif cl in ("azimuth", "az"):
+                col_map[c] = "azimuth"
+            elif cl in ("site_name", "sitename"):
+                col_map[c] = "site_name"
+        meta = cell_meta.rename(columns=col_map)
+        if all(c in meta.columns for c in ["lat", "lon", "azimuth"]):
+            sector_group = folium.FeatureGroup(name="Sector Wedges", show=True)
+            for _, row in meta.iterrows():
+                polygon = _build_wedge_polygon(
+                    float(row["lat"]), float(row["lon"]),
+                    float(row["azimuth"]), DEFAULT_HPBW_DEG, DEFAULT_ISD_M,
+                )
+                folium.Polygon(
+                    locations=polygon,
+                    color="#e94560",
+                    fill=True,
+                    fill_color="#0f3460",
+                    fill_opacity=0.25,
+                    weight=1.5,
+                    tooltip=str(row.get("site_name", row.get("cell_id", ""))),
+                ).add_to(sector_group)
+            sector_group.add_to(fmap)
+
+    folium.LayerControl(collapsed=False).add_to(fmap)
+
+    html_str = fmap._repr_html_()
+    return dcc.send_string(html_str, "vdt_map.html")
 
 
 # ─── Run ──────────────────────────────────────────────────────────────────────
