@@ -25,6 +25,7 @@ from dash.exceptions import PreventUpdate
 # ── Internal imports ──────────────────────────────────────────────────────────
 from parsers.l3_parser import parse_l3_bytes
 from parsers.events_parser import parse_events_bytes
+from parsers.ctrace_parser import parse_ctrace
 from parsers.gps_correlator import (
     parse_gps_bytes, correlate_gps_to_samples, apply_cell_centroid_positions
 )
@@ -179,6 +180,18 @@ def build_sidebar():
                     "background": "rgba(15,52,96,0.3)",
                 },
                 multiple=False,
+            ),
+            html.Div("📡 Cell Trace (.csv.gz · .csv)", style={"fontSize": "10px", "color": "#888", "marginBottom": "2px", "marginTop": "4px"}),
+            dcc.Upload(
+                id="upload-ctrace",
+                children=html.Div(["Cell Trace (.csv.gz · .csv)"], style={"fontSize": "11px", "color": MUTED}),
+                style={
+                    "border": f"1px dashed {ACCENT}", "borderRadius": "4px",
+                    "padding": "6px 8px", "marginBottom": "5px",
+                    "textAlign": "center", "cursor": "pointer",
+                    "background": "rgba(15,52,96,0.3)",
+                },
+                multiple=True,
             ),
 
             html.Div(
@@ -971,18 +984,20 @@ def _build_kpi_panel(kpis: dict) -> list:
     Input("upload-events", "contents"),
     Input("upload-gps", "contents"),
     Input("upload-cellmeta", "contents"),
+    Input("upload-ctrace", "contents"),
     State("upload-l3", "filename"),
     State("upload-events", "filename"),
     State("upload-gps", "filename"),
     State("upload-cellmeta", "filename"),
+    State("upload-ctrace", "filename"),
     State("store-samples", "data"),
     State("store-cellmeta", "data"),
     prevent_initial_call=True,
 )
 def handle_data_load(
     demo_clicks, clear_clicks,
-    l3_contents, ev_contents, gps_contents, meta_contents,
-    l3_fnames, ev_fnames, gps_fname, meta_fname,
+    l3_contents, ev_contents, gps_contents, meta_contents, ctrace_contents,
+    l3_fnames, ev_fnames, gps_fname, meta_fname, ctrace_fnames,
     existing_samples, existing_meta,
 ):
     ctx = callback_context
@@ -1051,6 +1066,18 @@ def handle_data_load(
                     status_parts.append(f"{fname}: {len(f)} records")
             except Exception as e:
                 logger.warning("Events error %s: %s", fname, e)
+
+    # Cell trace (Ericsson CTR CSV or CSV.GZ)
+    if trigger == "upload-ctrace" and ctrace_contents:
+        for content, fname in zip(ctrace_contents, ctrace_fnames or [""]):
+            try:
+                raw = _decode_upload(content, fname)
+                f = parse_ctrace(raw, filename=fname)
+                if not f.empty:
+                    frames.append(f)
+                    status_parts.append(f"{fname}: {len(f)} records")
+            except Exception as e:
+                logger.warning("CTR trace error %s: %s", fname, e)
 
     # Merge new frames with existing
     if frames:
