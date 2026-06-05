@@ -284,6 +284,7 @@ const N_DEMO  = 2000;
 let state = {
   samples:  [],   // unified array of sample objects
   cellMeta: [],   // cell metadata objects
+  cellDb:   {},   // {cell_id → {lat,lon,az,site}} for UE localization
   filtered: [],   // filtered view of samples
 };
 
@@ -598,20 +599,72 @@ function parseCellMetaCsv(text) {
   const res = Papa.parse(text.trim(), { header:true, dynamicTyping:true, skipEmptyLines:true });
   return res.data.map(r => {
     const row = Object.fromEntries(Object.entries(r).map(([k,v])=>[k.toLowerCase().trim(),v]));
+    // Support Ericsson DB.csv: eNBId + Cellid1 → composite cell_id = eNBId*1000 + Cellid1
+    const enbId    = parseInt(row.enbid);
+    const localCell = parseInt(row.cellid1);
+    let cellId = parseInt(row.cellid || row.cell_id) || 0;
+    if (!isNaN(enbId) && !isNaN(localCell)) cellId = enbId * 1000 + localCell;
     return {
-      cell_id:   parseInt(row.cellid || row.cell_id) || 0,
-      site:      row.site_name || row.sitename || row.site || '',
-      lat:       parseFloat(row.lat || row.latitude)  || NaN,
-      lon:       parseFloat(row.lon || row.longitude) || NaN,
-      az:        parseFloat(row.azimuth || row.az)    || 0,
-      pci:       parseInt(row.pci) || 0,
-      earfcn:    parseInt(row.earfcn) || 0,
-      band:      row.band || '',
-      tech:      row.tech || row.technology || 'LTE',
-      tilt:      parseFloat(row.tilt) || 0,
-      height:    parseFloat(row.height) || 30,
+      cell_id:    cellId,
+      enb_id:     isNaN(enbId) ? 0 : enbId,
+      local_cell: isNaN(localCell) ? 0 : localCell,
+      site:       row.site_name || row.sitename || row.site || '',
+      lat:        parseFloat(row.lat || row.latitude)  || NaN,
+      lon:        parseFloat(row.lon || row.longitude) || NaN,
+      az:         parseFloat(row.azimuth || row.az)    || 0,
+      pci:        parseInt(row.pci) || 0,
+      earfcn:     parseInt(row.earfcn) || 0,
+      band:       row.band || '',
+      tech:       row.tech || row.technology || 'LTE',
+      tilt:       parseFloat(row.tilt) || 0,
+      height:     parseFloat(row.height) || 30,
     };
   }).filter(r => isFinite(r.lat) && isFinite(r.lon));
+}
+
+// ── UE position estimation (RSRP log-distance path loss) ─────────────────────
+// n=3.5, RSRP_ref=-65 dBm at d_ref=100m (LTE macro ~46 dBm TX, 1800 MHz)
+
+const _UE_N = 3.5, _UE_RSRP_REF = -65, _UE_D_REF = 100;
+const _UE_D_MIN = 50, _UE_D_MAX = 15000, _UE_R = 6371000;
+
+function buildCellDb(cellMeta) {
+  const db = {};
+  for (const c of cellMeta) {
+    if (c.cell_id && isFinite(c.lat) && isFinite(c.lon))
+      db[c.cell_id] = { lat: c.lat, lon: c.lon, az: c.az, site: c.site };
+  }
+  return db;
+}
+
+function _rsrpToDist(rsrp) {
+  if (!isFinite(rsrp)) return _UE_D_MIN;
+  const d = _UE_D_REF * Math.pow(10, (_UE_RSRP_REF - rsrp) / (10 * _UE_N));
+  return Math.max(_UE_D_MIN, Math.min(_UE_D_MAX, d));
+}
+
+function _offsetPos(lat, lon, azDeg, distM) {
+  const b = azDeg * Math.PI / 180;
+  const lat1 = lat * Math.PI / 180, lon1 = lon * Math.PI / 180;
+  const dr = distM / _UE_R;
+  const lat2 = Math.asin(Math.sin(lat1)*Math.cos(dr) + Math.cos(lat1)*Math.sin(dr)*Math.cos(b));
+  const lon2 = lon1 + Math.atan2(Math.sin(b)*Math.sin(dr)*Math.cos(lat1),
+                                  Math.cos(dr) - Math.sin(lat1)*Math.sin(lat2));
+  return { lat: lat2 * 180/Math.PI, lon: lon2 * 180/Math.PI };
+}
+
+function applyUeLocalization(samples, cellDb) {
+  for (const s of samples) {
+    if (s.latitude != null) continue;
+    const cell = cellDb[s.cell_id];
+    if (!cell) continue;
+    const dist = (s.rsrp_dbm != null && isFinite(s.rsrp_dbm))
+      ? _rsrpToDist(s.rsrp_dbm) : 500;
+    const pos = _offsetPos(cell.lat, cell.lon, cell.az, dist);
+    s.latitude  = pos.lat;
+    s.longitude = pos.lon;
+  }
+  return samples;
 }
 
 // ── Gzip decompression (browser DecompressionStream API) ─────────────────────
@@ -1468,6 +1521,7 @@ function loadData(newSamples, cellMeta=null) {
 function clearAll() {
   state.samples=[];
   state.cellMeta=[];
+  state.cellDb={};
   state.filtered=[];
   clearAllLayers();
   document.getElementById('kpi-panel').innerHTML='<div style="color:#888;font-size:11px">No data loaded.</div>';
@@ -1586,10 +1640,11 @@ async function processFiles() {
   const msgs = [];
 
   try {
-    // 1. Cell metadata first (enables sector rendering)
+    // 1. Cell metadata first (enables sector rendering + UE localization)
     if (stagedFiles.meta) {
       const text = await stagedFiles.meta.text();
       state.cellMeta = parseCellMetaCsv(text);
+      state.cellDb   = buildCellDb(state.cellMeta);
       msgs.push(`Metadata: ${state.cellMeta.length} cells`);
     }
 
@@ -1631,9 +1686,11 @@ async function processFiles() {
         }
       }
       if (parsed.length) {
+        if (Object.keys(state.cellDb).length > 0) applyUeLocalization(parsed, state.cellDb);
         parsed.forEach(enrichSample);
         newSamples = newSamples.concat(parsed);
-        msgs.push(`Cell trace: ${parsed.length} records`);
+        const locCount = parsed.filter(s => s.latitude != null).length;
+        msgs.push(`Cell trace: ${parsed.length} records${locCount ? ` (${locCount} positioned)` : ''}`);
       }
     }
 
@@ -1705,6 +1762,7 @@ document.getElementById('btn-demo').addEventListener('click', () => {
   clearAll();
   const { samples, cellMeta } = generateDemoData();
   state.cellMeta = cellMeta;
+  state.cellDb   = buildCellDb(cellMeta);
   loadData(samples);
   setStatus(`Demo loaded: ${samples.length.toLocaleString()} samples over Muscat, Oman.`);
 });

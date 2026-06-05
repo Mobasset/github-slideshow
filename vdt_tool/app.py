@@ -26,6 +26,7 @@ from dash.exceptions import PreventUpdate
 from parsers.l3_parser import parse_l3_bytes
 from parsers.events_parser import parse_events_bytes
 from parsers.ctrace_parser import parse_ctrace, parse_ctrace_binary
+from parsers.ue_locator import build_cell_db, apply_ue_localization
 from parsers.gps_correlator import (
     parse_gps_bytes, correlate_gps_to_samples, apply_cell_centroid_positions
 )
@@ -1023,6 +1024,7 @@ def handle_data_load(
 
     gps_df = pd.DataFrame()
     cell_meta_df = existing_meta_df.copy()
+    cell_db = build_cell_db(cell_meta_df)
     status_parts = []
 
     # Cell metadata
@@ -1030,6 +1032,7 @@ def handle_data_load(
         try:
             raw = _decode_upload(meta_contents, meta_fname or "meta.csv")
             cell_meta_df = pd.read_csv(io.BytesIO(raw))
+            cell_db = build_cell_db(cell_meta_df)
             status_parts.append(f"Metadata: {len(cell_meta_df)} cells")
         except Exception as e:
             logger.warning("Meta CSV error: %s", e)
@@ -1094,9 +1097,14 @@ def handle_data_load(
             new_df["timestamp_ms"] = 0
         new_df = add_all_classes(new_df)
 
-        # Correlate GPS if available
+        # Position: GPS (best) → RSRP-based localization → cell centroid (fallback)
         if not gps_df.empty:
             new_df = correlate_gps_to_samples(new_df, gps_df)
+        elif cell_db:
+            new_df = apply_ue_localization(new_df, cell_db)
+            loc_count = new_df["latitude"].notna().sum()
+            if loc_count:
+                status_parts.append(f"UE location: {loc_count:,} samples positioned")
         elif not cell_meta_df.empty and ("latitude" not in new_df.columns or new_df["latitude"].isna().all()):
             new_df = apply_cell_centroid_positions(new_df, cell_meta_df)
 
