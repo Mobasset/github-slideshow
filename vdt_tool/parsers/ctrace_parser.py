@@ -279,12 +279,12 @@ def parse_ctrace(data: bytes, filename: str = "ctrace") -> pd.DataFrame:
             trigger = kv.get("MOBILITY_TRIGGER", "")
             if serving_rsrp:
                 try:
-                    rec["rsrp_dbm"] = float(serving_rsrp)
+                    rec["rsrp_dbm"] = float(serving_rsrp) - 140
                 except ValueError:
                     pass
             if serving_rsrq:
                 try:
-                    rec["rsrq_db"] = float(serving_rsrq)
+                    rec["rsrq_db"] = float(serving_rsrq) / 2 - 19.5
                 except ValueError:
                     pass
             if "A3" in trigger.upper():
