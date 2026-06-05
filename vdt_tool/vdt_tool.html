@@ -635,6 +635,7 @@ function buildCellDb(cellMeta) {
     if (c.cell_id && isFinite(c.lat) && isFinite(c.lon))
       db[c.cell_id] = { lat: c.lat, lon: c.lon, site: c.site };
   }
+  console.log(`[cellDb] built with ${Object.keys(db).length} cells. Keys (first 5): ${Object.keys(db).slice(0,5).join(', ')}`);
   return db;
 }
 
@@ -653,20 +654,30 @@ function _weightedCentroid(cellRsrp, cellDb) {
 }
 
 function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
+  const dbKeys = Object.keys(cellDb);
+  const sampleCids = [...new Set(samples.map(s => String(s.cell_id)))];
+  const matched = sampleCids.filter(c => cellDb[c]);
+  console.log(`[UE-Loc] samples=${samples.length} | cellDb=${dbKeys.length} cells | sample cell_ids=${sampleCids.slice(0,5).join(',')} | matched=${matched.length}`);
+  if (matched.length === 0 && dbKeys.length > 0) {
+    console.warn('[UE-Loc] No cell_id overlap between trace and DB! Trace IDs:', sampleCids.slice(0,8), 'DB IDs:', dbKeys.slice(0,8));
+  }
+
+  let pass1 = 0, pass2 = 0;
+
   // Group by RNTI (skip 0)
   const groups = {};
   for (let i = 0; i < samples.length; i++) {
-    const s = samples[i];
-    const rnti = s.rnti || 0;
+    const rnti = samples[i].rnti || 0;
     if (rnti === 0) continue;
     if (!groups[rnti]) groups[rnti] = [];
     groups[rnti].push(i);
   }
+  console.log(`[UE-Loc] RNTI groups: ${Object.keys(groups).length}, RNTIs: ${Object.keys(groups).slice(0,6).join(',')}`);
 
   // Pass 1: windowed weighted centroid per RNTI
   for (const [, indices] of Object.entries(groups)) {
-    indices.sort((a, b) => samples[a].timestamp_ms - samples[b].timestamp_ms);
-    const ts = indices.map(i => samples[i].timestamp_ms);
+    indices.sort((a, b) => (samples[a].timestamp_ms || 0) - (samples[b].timestamp_ms || 0));
+    const ts = indices.map(i => samples[i].timestamp_ms || 0);
     let lo = 0, hi = 0;
     for (let pos = 0; pos < indices.length; pos++) {
       const t = ts[pos];
@@ -675,10 +686,10 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
 
       const cellRsrp = {};
       for (let k = lo; k < hi; k++) {
-        const s = samples[indices[k]];
-        const cid = String(s.cell_id);
+        const samp = samples[indices[k]];
+        const cid = String(samp.cell_id);
         if (!cellDb[cid]) continue;
-        const rsrp = s.rsrp_dbm;
+        const rsrp = samp.rsrp_dbm;
         if (rsrp != null && isFinite(rsrp)) {
           if (cellRsrp[cid] == null || rsrp > cellRsrp[cid])
             cellRsrp[cid] = rsrp;
@@ -686,12 +697,13 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
       }
 
       if (Object.keys(cellRsrp).length === 0) continue;
-      const s = samples[indices[pos]];
-      if (s.latitude != null) continue;  // keep GPS if already set
+      const samp = samples[indices[pos]];
+      if (samp.latitude != null) continue;
       const pos2 = _weightedCentroid(cellRsrp, cellDb);
       if (pos2) {
-        s.latitude  = pos2.lat;
-        s.longitude = pos2.lon;
+        samp.latitude  = pos2.lat;
+        samp.longitude = pos2.lon;
+        pass1++;
       }
     }
   }
@@ -703,8 +715,10 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
     if (!cell) continue;
     s.latitude  = cell.lat;
     s.longitude = cell.lon;
+    pass2++;
   }
 
+  console.log(`[UE-Loc] positioned: pass1=${pass1}, pass2=${pass2}, total=${pass1+pass2}`);
   return samples;
 }
 
@@ -1738,11 +1752,16 @@ async function processFiles() {
         }
       }
       if (parsed.length) {
-        if (Object.keys(state.cellDb).length > 0) applyUeLocalization(parsed, state.cellDb);
+        const dbSize = Object.keys(state.cellDb).length;
+        if (dbSize > 0) applyUeLocalization(parsed, state.cellDb);
         parsed.forEach(enrichSample);
         newSamples = newSamples.concat(parsed);
         const locCount = parsed.filter(s => s.latitude != null).length;
-        msgs.push(`Cell trace: ${parsed.length} records${locCount ? ` (${locCount} positioned)` : ''}`);
+        msgs.push(`Cell trace: ${parsed.length} records · ${locCount} positioned`);
+        if (locCount === 0 && dbSize > 0)
+          msgs.push('⚠ 0 positioned — cell_id mismatch? Open DevTools console for details');
+        else if (dbSize === 0)
+          msgs.push('⚠ No cell metadata — upload DB.csv to enable positioning');
       }
     }
 
