@@ -34,6 +34,17 @@ html,body{height:100%;overflow:hidden;background:#1a1a2e;color:#e0e0e0;font-fami
 .btn-demo:hover{background:#c73652}
 .btn-clear{width:100%;padding:5px;background:transparent;color:#888;border:1px solid #2a2a4a;border-radius:4px;cursor:pointer;font-size:11px}
 .btn-clear:hover{color:#e0e0e0;border-color:#888}
+.input-block{margin-bottom:5px}
+.input-label{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.fmt-hint{background:#0f3460;color:#7ab0d4;font-size:9px;padding:1px 5px;border-radius:3px;text-transform:none;letter-spacing:0;flex-shrink:0}
+.up-row{display:flex;align-items:center;gap:8px;border:1px dashed #0f3460;border-radius:4px;padding:5px 8px;cursor:pointer;background:rgba(15,52,96,.3);transition:border-color .2s;width:100%}
+.up-row:hover{border-color:#e94560}
+.up-icon{font-size:13px;flex-shrink:0;line-height:1}
+.up-name{font-size:10px;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.up-name.staged{color:#2ecc71}
+.btn-process{width:100%;padding:7px;background:#27ae60;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;margin-bottom:4px;letter-spacing:.5px}
+.btn-process:hover{background:#1e8449}
+.btn-process:disabled{background:#1a3a2a;color:#4a7a4a;cursor:not-allowed}
 .kpi-label{color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
 .kpi-val{font-family:monospace;font-size:14px;font-weight:bold;margin-bottom:4px}
 .radio-grp label{display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:12px;cursor:pointer}
@@ -102,13 +113,35 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
 
     <div class="sec-hdr">Input Files</div>
 
-    <label class="upload-zone"><input type="file" id="file-l3" accept=".log,.txt,.pcap">4G/5G RRC Log (.log / .txt)</label>
-    <label class="upload-zone"><input type="file" id="file-events" accept=".csv,.log,.txt">Events CSV / Log</label>
-    <label class="upload-zone"><input type="file" id="file-gps" accept=".csv,.kml,.gpx">GPS Track (CSV / KML / GPX)</label>
-    <label class="upload-zone"><input type="file" id="file-meta" accept=".csv">Cell Metadata CSV</label>
+    <div class="input-block">
+      <div class="input-label">Cell Trace <span class="fmt-hint">.bin.gz · .csv</span></div>
+      <label class="up-row"><input type="file" id="file-celltrace" accept=".gz,.csv" style="display:none">
+        <span class="up-icon">📡</span><span class="up-name" id="fname-celltrace">No file selected</span></label>
+    </div>
+    <div class="input-block">
+      <div class="input-label">RRC L3 Log <span class="fmt-hint">.log · .txt</span></div>
+      <label class="up-row"><input type="file" id="file-l3" accept=".log,.txt" style="display:none">
+        <span class="up-icon">📋</span><span class="up-name" id="fname-l3">No file selected</span></label>
+    </div>
+    <div class="input-block">
+      <div class="input-label">Events <span class="fmt-hint">.csv · .log</span></div>
+      <label class="up-row"><input type="file" id="file-events" accept=".csv,.log,.txt" style="display:none">
+        <span class="up-icon">⚡</span><span class="up-name" id="fname-events">No file selected</span></label>
+    </div>
+    <div class="input-block">
+      <div class="input-label">GPS Track <span class="fmt-hint">.csv · .kml · .gpx</span></div>
+      <label class="up-row"><input type="file" id="file-gps" accept=".csv,.kml,.gpx" style="display:none">
+        <span class="up-icon">🗺</span><span class="up-name" id="fname-gps">No file selected</span></label>
+    </div>
+    <div class="input-block">
+      <div class="input-label">Cell Metadata <span class="fmt-hint">.csv</span></div>
+      <label class="up-row"><input type="file" id="file-meta" accept=".csv" style="display:none">
+        <span class="up-icon">📊</span><span class="up-name" id="fname-meta">No file selected</span></label>
+    </div>
 
+    <button class="btn-process" id="btn-process" disabled>⚙ Process Files</button>
     <button class="btn-demo" id="btn-demo">▶ Load Demo Data</button>
-    <button class="btn-clear" id="btn-clear">Clear All</button>
+    <button class="btn-clear" id="btn-clear">✕ Clear All</button>
 
     <div class="sec-hdr">KPIs</div>
     <div id="kpi-panel">
@@ -579,6 +612,70 @@ function parseCellMetaCsv(text) {
       height:    parseFloat(row.height) || 30,
     };
   }).filter(r => isFinite(r.lat) && isFinite(r.lon));
+}
+
+// ── Cell Trace CSV parser (Ericsson ENIQ/OSS export or parsed CTR CSV) ────────
+
+function parseCellTraceCsv(text) {
+  const res = Papa.parse(text.trim(), { header:true, dynamicTyping:true, skipEmptyLines:true });
+  if (!res.data.length) return [];
+  const colMap = {
+    datetime_id:'timestamp_ms', timestamp_ms:'timestamp_ms', timestamp:'timestamp_ms',
+    time:'timestamp_ms', date_time:'timestamp_ms', date:'timestamp_ms',
+    event_id:'event_type', event_type:'event_type', eventtype:'event_type', event_name:'event_type',
+    cell_id:'cell_id', cellid:'cell_id', enodeb_id:'cell_id', global_cell_id:'cell_id',
+    eci:'cell_id', enb_id:'cell_id', source_cell:'cell_id',
+    imsi:'rnti', rnti:'rnti', ue_context_id:'rnti',
+    rsrp:'rsrp_dbm', rsrp_dbm:'rsrp_dbm', mr_rsrp:'rsrp_dbm', rsrp_result:'rsrp_dbm',
+    rsrq:'rsrq_db', rsrq_db:'rsrq_db', mr_rsrq:'rsrq_db', rsrq_result:'rsrq_db',
+    sinr:'sinr_db', sinr_db:'sinr_db', mr_sinr:'sinr_db', sinr_result:'sinr_db',
+    earfcn:'earfcn', dl_earfcn:'earfcn', arfcn:'earfcn', dl_carrierfreq:'earfcn',
+    pci:'pci', pcell_pci:'pci', physicalcellid:'pci', physical_cell_id:'pci',
+    cause_value:'event_cause', cause_code:'event_cause', causecode:'event_cause', cause:'event_cause',
+    cqi:'cqi', wbcqi:'cqi', cqi_cw0:'cqi',
+    ta:'ta_us', timing_advance:'ta_us', ta_value:'ta_us',
+    throughput_dl:'throughput_dl_mbps', dl_tput:'throughput_dl_mbps', dl_throughput:'throughput_dl_mbps',
+    throughput_ul:'throughput_ul_mbps', ul_tput:'throughput_ul_mbps', ul_throughput:'throughput_ul_mbps',
+  };
+  const eventIdToName = {
+    1:'INTERNAL_HANDOVER_ATTEMPT', 2:'INTERNAL_HANDOVER_SUCCESS', 3:'INTERNAL_HANDOVER_FAILURE',
+    4:'RRC_RLF', 5:'INTERNAL_ERAB_SETUP', 6:'INTERNAL_UE_CONTEXT_RELEASE',
+    7:'INTERNAL_RAB_ESTABLISHMENT', 8:'NR_SCG_FAILURE', 9:'A3_TRIGGER', 10:'A5_TRIGGER',
+  };
+  return res.data.map(row => {
+    const s = {};
+    for (const [k,v] of Object.entries(row)) {
+      const key = k.toLowerCase().trim().replace(/[\s\-]+/g,'_');
+      s[colMap[key] || key] = v;
+    }
+    s.timestamp_ms = tsToMs(s.timestamp_ms);
+    s.cell_id  = parseInt(s.cell_id)  || 0;
+    s.pci      = parseInt(s.pci)      || 0;
+    s.earfcn   = parseInt(s.earfcn)   || 0;
+    s.cqi      = parseFloat(s.cqi);
+    // Apply 3GPP IE→dBm conversion if raw positive IE value
+    const rv = parseFloat(s.rsrp_dbm);
+    s.rsrp_dbm = isFinite(rv) ? (rv > 0 ? rv - 140 : rv) : NaN;
+    const rq = parseFloat(s.rsrq_db);
+    s.rsrq_db  = isFinite(rq) ? (rq > 0 ? rq/2 - 19.5 : rq) : NaN;
+    const sn = parseFloat(s.sinr_db);
+    s.sinr_db  = isFinite(sn) ? (sn > 0 ? sn*0.5 - 23 : sn) : NaN;
+    // Numeric EVENT_ID → name
+    let et = String(s.event_type || '').trim();
+    const numId = parseInt(et);
+    if (!isNaN(numId) && eventIdToName[numId]) et = eventIdToName[numId];
+    et = normalizeEventType(et);
+    s.event_type  = et;
+    s.ho_attempt  = et==='INTERNAL_HANDOVER_ATTEMPT'?1:0;
+    s.ho_success  = et==='INTERNAL_HANDOVER_SUCCESS'?1:0;
+    s.ho_failure  = et==='INTERNAL_HANDOVER_FAILURE'?1:0;
+    s.rlf_flag    = et==='RRC_RLF'?1:0;
+    s.scg_failure = et==='NR_SCG_FAILURE'?1:0;
+    s.a3_trigger  = et==='A3_TRIGGER'?1:0;
+    s.a5_trigger  = et==='A5_TRIGGER'?1:0;
+    s.source_file = 'cell_trace_csv';
+    return s;
+  });
 }
 
 // ── GPS correlation ───────────────────────────────────────────────────────────
@@ -1233,51 +1330,114 @@ ${styles}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// FILE UPLOAD HANDLER
+// FILE STAGING + PROCESS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function handleFile(inputId, type) {
+const stagedFiles = { celltrace:null, l3:null, events:null, gps:null, meta:null };
+
+function stageFile(inputId, type) {
   const input = document.getElementById(inputId);
   const file = input.files[0];
   if (!file) return;
-  setStatus(`Parsing ${file.name}…`);
-  const text = await file.text();
+  stagedFiles[type] = file;
+  const nameEl = document.getElementById(`fname-${type}`);
+  nameEl.textContent = file.name;
+  nameEl.classList.add('staged');
+  document.getElementById('btn-process').disabled = false;
+  setStatus(`Staged: ${file.name} — click Process Files to load.`);
+}
 
-  let newSamples = [], newMeta = null;
+async function processFiles() {
+  const hasFile = Object.values(stagedFiles).some(f => f);
+  if (!hasFile) { setStatus('No files selected.'); return; }
+
+  const btn = document.getElementById('btn-process');
+  btn.disabled = true;
+  btn.textContent = '⏳ Processing…';
+  const msgs = [];
+
   try {
-    if (type === 'gps') {
-      const fname = file.name.toLowerCase();
+    // 1. Cell metadata first (enables sector rendering)
+    if (stagedFiles.meta) {
+      const text = await stagedFiles.meta.text();
+      state.cellMeta = parseCellMetaCsv(text);
+      msgs.push(`Metadata: ${state.cellMeta.length} cells`);
+    }
+
+    let newSamples = [];
+
+    // 2. Cell trace CSV (or warn on binary .bin.gz)
+    if (stagedFiles.celltrace) {
+      const fname = stagedFiles.celltrace.name.toLowerCase();
+      if (fname.endsWith('.gz') && !fname.endsWith('.csv.gz')) {
+        msgs.push('⚠ Binary CTR file (.bin.gz) cannot be parsed in the browser — export to CSV via Ericsson ENIQ/OSS first');
+      } else {
+        const text = await stagedFiles.celltrace.text();
+        const parsed = parseCellTraceCsv(text);
+        parsed.forEach(enrichSample);
+        newSamples = newSamples.concat(parsed);
+        msgs.push(`Cell trace: ${parsed.length} records`);
+      }
+    }
+
+    // 3. L3 RRC log
+    if (stagedFiles.l3) {
+      const text = await stagedFiles.l3.text();
+      const parsed = parseL3Log(text);
+      parsed.forEach(enrichSample);
+      newSamples = newSamples.concat(parsed);
+      msgs.push(`L3 log: ${parsed.length} records`);
+    }
+
+    // 4. Events CSV / log
+    if (stagedFiles.events) {
+      const text = await stagedFiles.events.text();
+      const parsed = parseEventsCsv(text);
+      parsed.forEach(enrichSample);
+      newSamples = newSamples.concat(parsed);
+      msgs.push(`Events: ${parsed.length} records`);
+    }
+
+    // Load all non-GPS samples first
+    if (newSamples.length) {
+      loadData(newSamples, null);
+    }
+
+    // 5. GPS correlation last (needs samples in state)
+    if (stagedFiles.gps) {
+      const text = await stagedFiles.gps.text();
+      const fname = stagedFiles.gps.name.toLowerCase();
       let gpsPts = [];
       if (fname.endsWith('.kml'))      gpsPts = parseGpsKml(text);
       else if (fname.endsWith('.gpx')) gpsPts = parseGpsGpx(text);
       else                             gpsPts = parseGpsCsv(text);
-      // Attach GPS to existing samples
       state.samples = correlateGps(state.samples, gpsPts);
       state.samples.forEach(enrichSample);
       state.filtered = applyFilters(state.samples);
       renderAll();
       renderTimeline(state.filtered);
-      setStatus(`GPS: ${gpsPts.length} points correlated.`);
-      return;
-    } else if (type === 'events') {
-      const fname = file.name.toLowerCase();
-      newSamples = fname.endsWith('.csv') ? parseEventsCsv(text) : parseEventsCsv(text);
-    } else if (type === 'l3') {
-      newSamples = parseL3Log(text);
-    } else if (type === 'meta') {
-      newMeta = parseCellMetaCsv(text);
-      state.cellMeta = newMeta;
-      renderAll();
-      setStatus(`Metadata: ${newMeta.length} cells loaded.`);
-      return;
+      updateKpiPanel(computeKpis(state.filtered));
+      msgs.push(`GPS: ${gpsPts.length} pts correlated`);
     }
-    newSamples.forEach(enrichSample);
-    loadData(newSamples, newMeta);
+
+    // Reset staged state
+    Object.keys(stagedFiles).forEach(k => stagedFiles[k] = null);
+    ['celltrace','l3','events','gps','meta'].forEach(t => {
+      const el = document.getElementById(`fname-${t}`);
+      el.textContent = 'No file selected';
+      el.classList.remove('staged');
+      document.getElementById(`file-${t}`).value = '';
+    });
+    btn.disabled = true;
+
+    setStatus('✓ ' + (msgs.join(' · ') || `${state.samples.length.toLocaleString()} samples loaded`));
   } catch(e) {
-    setStatus(`Error parsing ${file.name}: ${e.message}`);
+    setStatus(`Error: ${e.message}`);
     console.error(e);
+    btn.disabled = false;
   }
-  input.value = '';
+
+  btn.textContent = '⚙ Process Files';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1294,10 +1454,12 @@ document.getElementById('btn-demo').addEventListener('click', () => {
 
 document.getElementById('btn-clear').addEventListener('click', clearAll);
 
-document.getElementById('file-l3').addEventListener('change', () => handleFile('file-l3','l3'));
-document.getElementById('file-events').addEventListener('change', () => handleFile('file-events','events'));
-document.getElementById('file-gps').addEventListener('change', () => handleFile('file-gps','gps'));
-document.getElementById('file-meta').addEventListener('change', () => handleFile('file-meta','meta'));
+document.getElementById('file-celltrace').addEventListener('change', () => stageFile('file-celltrace','celltrace'));
+document.getElementById('file-l3').addEventListener('change', () => stageFile('file-l3','l3'));
+document.getElementById('file-events').addEventListener('change', () => stageFile('file-events','events'));
+document.getElementById('file-gps').addEventListener('change', () => stageFile('file-gps','gps'));
+document.getElementById('file-meta').addEventListener('change', () => stageFile('file-meta','meta'));
+document.getElementById('btn-process').addEventListener('click', processFiles);
 
 document.querySelectorAll('input[name=viz]').forEach(r => r.addEventListener('change', renderAll));
 document.getElementById('sel-metric').addEventListener('change', renderAll);
