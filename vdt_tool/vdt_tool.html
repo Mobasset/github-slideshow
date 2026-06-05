@@ -617,6 +617,11 @@ function parseCellMetaCsv(text) {
 // ── Gzip decompression (browser DecompressionStream API) ─────────────────────
 
 async function decompressGzip(file) {
+  const bytes = await decompressGzipBytes(file);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+async function decompressGzipBytes(file) {
   const buf = await file.arrayBuffer();
   const ds = new DecompressionStream('gzip');
   const writer = ds.writable.getWriter();
@@ -633,7 +638,87 @@ async function decompressGzip(file) {
   const out = new Uint8Array(total);
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
-  return new TextDecoder('utf-8').decode(out);
+  return out;
+}
+
+// ── Ericsson CTR binary parser ────────────────────────────────────────────────
+// Record layout:  [0-1] length (BE uint16)  [2] padding  [3] type (4=event)
+// Event payload:  [2] event_id  [3-5] H,M,S  [6-7] ms (BE)
+//                 [13-14] eNB_ID (BE)  [15] local_cell
+// 0x0b: RSRP/RSRQ packed at [42-43], CRNTI at [51-52]
+// 0x49: RSRP at [48], RSRQ at [49]  (0x80=unavailable)
+// 3GPP: RSRP_dBm = IE-140, RSRQ_dB = IE/2-19.5
+
+function parseEricssonCTraceBinary(bytes, filename) {
+  const dm = (filename || '').match(/A(\d{4})(\d{2})(\d{2})/);
+  const dateStr = dm ? `${dm[1]}-${dm[2]}-${dm[3]}` : new Date().toISOString().slice(0, 10);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const records = [];
+  let offset = 0;
+  const len = bytes.length;
+
+  function parseTs(h, m, s, ms) {
+    const iso = `${dateStr}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(ms).padStart(3,'0')}Z`;
+    return new Date(iso).getTime();
+  }
+
+  while (offset + 4 <= len) {
+    const recLen = dv.getUint16(offset, false);
+    if (recLen < 4 || offset + recLen > len) break;
+    const recType = bytes[offset + 3];
+    if (recType === 0x04 && recLen > 4) {
+      const pOff = offset + 4;
+      const pLen = recLen - 4;
+      if (pLen >= 9) {
+        const evId = bytes[pOff + 2];
+        const h = bytes[pOff + 3];
+        const m = bytes[pOff + 4];
+        const s = bytes[pOff + 5];
+        const ms = dv.getUint16(pOff + 6, false);
+        const ts = parseTs(h, m, s, ms);
+        let cellId = 0;
+        if (pLen >= 16) {
+          const enbId = dv.getUint16(pOff + 13, false);
+          cellId = enbId * 1000 + bytes[pOff + 15];
+        }
+        const base = {
+          timestamp_ms: ts, cell_id: cellId, rnti: 0,
+          rsrp_dbm: null, rsrq_db: null, sinr_db: null,
+          ho_attempt: 0, ho_success: 0, ho_failure: 0,
+          rlf_flag: 0, scg_failure: 0, a3_trigger: 0, a5_trigger: 0,
+          event_cause: '', source_file: filename,
+        };
+
+        if (evId === 0x0b && pLen >= 44) {        // RRC_MEASUREMENT_REPORT
+          const word = dv.getUint16(pOff + 42, false);
+          const rsrpIe = (word >> 8) & 0x7F;
+          const rsrqIe = (word >> 2) & 0x3F;
+          base.rsrp_dbm = rsrpIe - 140;
+          base.rsrq_db  = rsrqIe / 2 - 19.5;
+          if (pLen >= 53) base.rnti = dv.getUint16(pOff + 51, false);
+          records.push({ ...base, event_type: 'RRC_MEASUREMENT_REPORT' });
+
+        } else if (evId === 0x49 && pLen >= 50) {  // INTERNAL_EVENT_UE_MOBILITY_EVAL
+          const rsrpRaw = bytes[pOff + 48];
+          const rsrqRaw = bytes[pOff + 49];
+          if (rsrpRaw !== 0x80) base.rsrp_dbm = rsrpRaw - 140;
+          if (rsrqRaw !== 0x80) base.rsrq_db  = rsrqRaw / 2 - 19.5;
+          records.push({ ...base, event_type: 'INTERNAL_EVENT_UE_MOBILITY_EVAL' });
+
+        } else if (evId === 0x34) {                // NR SCG failure
+          records.push({ ...base, event_type: 'NR_SCG_FAILURE', scg_failure: 1 });
+
+        } else if (evId === 0x1e || evId === 0x1f) { // RLF / re-establishment
+          records.push({ ...base, event_type: 'RRC_RLF', rlf_flag: 1 });
+
+        } else if (evId === 0x03) {                // INTERNAL_PER_RADIO_UE_MEASUREMENT
+          records.push({ ...base, event_type: 'INTERNAL_PER_RADIO_UE_MEASUREMENT' });
+        }
+      }
+    }
+    offset += recLen;
+  }
+  return records;
 }
 
 // ── Ericsson CTR cell trace CSV parser ────────────────────────────────────────
@@ -1510,27 +1595,42 @@ async function processFiles() {
 
     let newSamples = [];
 
-    // 2. Cell trace (Ericsson CTR .csv.gz / .csv, or generic flat CSV)
+    // 2. Cell trace (Ericsson CTR .bin.gz / .bin, .csv.gz / .csv, or generic flat CSV)
     if (stagedFiles.celltrace) {
       const fname = stagedFiles.celltrace.name.toLowerCase();
-      let text = null;
-      if (fname.endsWith('.gz')) {
+      const isBinary = fname.endsWith('.bin.gz') || fname.endsWith('.bin');
+      let parsed = [];
+      if (isBinary) {
         try {
-          setStatus('⏳ Decompressing cell trace…');
-          text = await decompressGzip(stagedFiles.celltrace);
+          setStatus('⏳ Decompressing binary cell trace…');
+          const bytes = fname.endsWith('.gz')
+            ? await decompressGzipBytes(stagedFiles.celltrace)
+            : new Uint8Array(await stagedFiles.celltrace.arrayBuffer());
+          parsed = parseEricssonCTraceBinary(bytes, stagedFiles.celltrace.name);
         } catch(e) {
-          msgs.push(`⚠ Decompress failed: ${e.message}`);
+          msgs.push(`⚠ Binary CTR parse failed: ${e.message}`);
         }
       } else {
-        text = await stagedFiles.celltrace.text();
-      }
-      if (text) {
-        let parsed;
-        if (text.slice(0, 300).includes('ERBS_Name') || text.slice(0, 300).includes('Global_Cell_ID')) {
-          parsed = parseEricssonCTrace(text, stagedFiles.celltrace.name);
+        let text = null;
+        if (fname.endsWith('.gz')) {
+          try {
+            setStatus('⏳ Decompressing cell trace…');
+            text = await decompressGzip(stagedFiles.celltrace);
+          } catch(e) {
+            msgs.push(`⚠ Decompress failed: ${e.message}`);
+          }
         } else {
-          parsed = parseCellTraceCsv(text);
+          text = await stagedFiles.celltrace.text();
         }
+        if (text) {
+          if (text.slice(0, 300).includes('ERBS_Name') || text.slice(0, 300).includes('Global_Cell_ID')) {
+            parsed = parseEricssonCTrace(text, stagedFiles.celltrace.name);
+          } else {
+            parsed = parseCellTraceCsv(text);
+          }
+        }
+      }
+      if (parsed.length) {
         parsed.forEach(enrichSample);
         newSamples = newSamples.concat(parsed);
         msgs.push(`Cell trace: ${parsed.length} records`);

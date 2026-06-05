@@ -25,7 +25,7 @@ from dash.exceptions import PreventUpdate
 # ── Internal imports ──────────────────────────────────────────────────────────
 from parsers.l3_parser import parse_l3_bytes
 from parsers.events_parser import parse_events_bytes
-from parsers.ctrace_parser import parse_ctrace
+from parsers.ctrace_parser import parse_ctrace, parse_ctrace_binary
 from parsers.gps_correlator import (
     parse_gps_bytes, correlate_gps_to_samples, apply_cell_centroid_positions
 )
@@ -181,10 +181,10 @@ def build_sidebar():
                 },
                 multiple=False,
             ),
-            html.Div("📡 Cell Trace (.csv.gz · .csv)", style={"fontSize": "10px", "color": "#888", "marginBottom": "2px", "marginTop": "4px"}),
+            html.Div("📡 Cell Trace (.bin.gz · .csv.gz · .csv)", style={"fontSize": "10px", "color": "#888", "marginBottom": "2px", "marginTop": "4px"}),
             dcc.Upload(
                 id="upload-ctrace",
-                children=html.Div(["Cell Trace (.csv.gz · .csv)"], style={"fontSize": "11px", "color": MUTED}),
+                children=html.Div(["Cell Trace (.bin.gz · .csv.gz · .csv)"], style={"fontSize": "11px", "color": MUTED}),
                 style={
                     "border": f"1px dashed {ACCENT}", "borderRadius": "4px",
                     "padding": "6px 8px", "marginBottom": "5px",
@@ -1067,12 +1067,16 @@ def handle_data_load(
             except Exception as e:
                 logger.warning("Events error %s: %s", fname, e)
 
-    # Cell trace (Ericsson CTR CSV or CSV.GZ)
+    # Cell trace (Ericsson CTR binary .bin/.bin.gz or CSV .csv/.csv.gz)
     if trigger == "upload-ctrace" and ctrace_contents:
         for content, fname in zip(ctrace_contents, ctrace_fnames or [""]):
             try:
                 raw = _decode_upload(content, fname)
-                f = parse_ctrace(raw, filename=fname)
+                fname_lower = fname.lower()
+                if fname_lower.endswith(".bin.gz") or fname_lower.endswith(".bin"):
+                    f = parse_ctrace_binary(raw, filename=fname)
+                else:
+                    f = parse_ctrace(raw, filename=fname)
                 if not f.empty:
                     frames.append(f)
                     status_parts.append(f"{fname}: {len(f)} records")

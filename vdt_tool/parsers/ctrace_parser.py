@@ -27,6 +27,7 @@ import gzip
 import io
 import logging
 import re
+import struct
 from typing import Optional
 
 import numpy as np
@@ -349,4 +350,157 @@ def parse_ctrace(data: bytes, filename: str = "ctrace") -> pd.DataFrame:
         if col not in df.columns:
             df[col] = np.nan if col not in {"event_type", "event_cause", "source_file"} else ""
 
+    return df[_empty_df().columns]
+
+
+# ── Binary CTR constants ──────────────────────────────────────────────────────
+
+# Record type byte (offset 3 from record start)
+_REC_TYPE_EVENT = 0x04
+
+# Binary event IDs → canonical event name (only those we extract useful data from)
+_BIN_EVENT_NAMES = {
+    0x0b: "RRC_MEASUREMENT_REPORT",
+    0x49: "INTERNAL_EVENT_UE_MOBILITY_EVAL",
+    0x34: "RRC_SCG_FAILURE_INFORMATION_NR",
+    0x1e: "RRC_RRC_CONNECTION_RE_ESTABLISHMENT_REQUEST",
+    0x1f: "INTERNAL_PROC_RRC_CONNECTION_RE_ESTABLISHMENT",
+    0x03: "INTERNAL_PER_RADIO_UE_MEASUREMENT",
+}
+
+
+def parse_ctrace_binary(data: bytes, filename: str = "ctrace.bin") -> pd.DataFrame:
+    """
+    Parse an Ericsson CTR binary file (.bin or .bin.gz) into a VDT samples DataFrame.
+
+    Record layout (TLV-like):
+      bytes 0-1  : record length (big-endian uint16, includes these 4 header bytes)
+      byte  2    : padding (0x00)
+      byte  3    : record type  (0=file_header, 3=timestamp, 4=event)
+
+    Event payload (from byte 4):
+      [0:2]   cell/module ref
+      [2]     event type ID
+      [3]     hour
+      [4]     minute
+      [5]     second
+      [6:8]   milliseconds (big-endian uint16)
+      [13:15] eNB ID (big-endian uint16)
+      [15]    local cell ID
+      [42:44] RSRP/RSRQ packed word for event 0x0b (big-endian uint16)
+      [48]    RSRP IE for event 0x49  (0x80 = unavailable)
+      [49]    RSRQ IE for event 0x49  (0x80 = unavailable)
+      [51:53] CRNTI for event 0x0b   (big-endian uint16)
+
+    3GPP conversions:  RSRP_dBm = IE - 140,  RSRQ_dB = IE/2 - 19.5
+    """
+    if filename.lower().endswith(".gz"):
+        try:
+            data = gzip.decompress(data)
+        except Exception as exc:
+            logger.warning("CTR binary gzip decompress failed for %s: %s", filename, exc)
+            return _empty_df()
+
+    date_str = _extract_date_str(filename)
+    if date_str is None:
+        date_str = str(pd.Timestamp.now(tz="UTC").date())
+        logger.warning("Could not extract date from binary filename '%s'; using %s", filename, date_str)
+
+    records = []
+    offset = 0
+    data_len = len(data)
+
+    while offset + 4 <= data_len:
+        rec_len = struct.unpack(">H", data[offset: offset + 2])[0]
+        if rec_len < 4 or offset + rec_len > data_len:
+            break
+
+        rec_type = data[offset + 3]
+        payload = data[offset + 4: offset + rec_len]
+
+        if rec_type == _REC_TYPE_EVENT and len(payload) >= 9:
+            event_id = payload[2]
+            if event_id in _BIN_EVENT_NAMES:
+                h = payload[3]
+                m = payload[4]
+                s = payload[5]
+                ms = struct.unpack(">H", payload[6:8])[0]
+                ts_str = f"{h}:{m:02d}:{s:02d}:{ms:03d}"
+                ts_ms = _parse_time(date_str, ts_str)
+                ts_utc = _parse_timestamp_utc(date_str, ts_str)
+
+                cell_id = 0
+                if len(payload) >= 16:
+                    enb_id = struct.unpack(">H", payload[13:15])[0]
+                    local_cell = payload[15]
+                    cell_id = enb_id * 1000 + local_cell
+
+                rec = {
+                    "timestamp_utc":      ts_utc,
+                    "timestamp_ms":       ts_ms,
+                    "cell_id":            cell_id,
+                    "rnti":               0,
+                    "pci":                0,
+                    "earfcn":             0,
+                    "rsrp_dbm":           np.nan,
+                    "rsrq_db":            np.nan,
+                    "sinr_db":            np.nan,
+                    "cqi":                np.nan,
+                    "ta_us":              np.nan,
+                    "throughput_dl_mbps": np.nan,
+                    "throughput_ul_mbps": np.nan,
+                    "ho_attempt":         0,
+                    "ho_success":         0,
+                    "ho_failure":         0,
+                    "rlf_flag":           0,
+                    "rab_setup":          0,
+                    "scg_failure":        0,
+                    "a3_trigger":         0,
+                    "a5_trigger":         0,
+                    "event_type":         _BIN_EVENT_NAMES[event_id],
+                    "event_cause":        "",
+                    "source_file":        filename,
+                }
+
+                if event_id == 0x0b:  # RRC_MEASUREMENT_REPORT
+                    if len(payload) >= 44:
+                        word = struct.unpack(">H", payload[42:44])[0]
+                        rsrp_ie = (word >> 8) & 0x7F
+                        rsrq_ie = (word >> 2) & 0x3F
+                        rec["rsrp_dbm"] = rsrp_ie - 140
+                        rec["rsrq_db"] = rsrq_ie / 2 - 19.5
+                    if len(payload) >= 53:
+                        rec["rnti"] = struct.unpack(">H", payload[51:53])[0]
+
+                elif event_id == 0x49:  # INTERNAL_EVENT_UE_MOBILITY_EVAL
+                    if len(payload) >= 50:
+                        rsrp_raw = payload[48]
+                        rsrq_raw = payload[49]
+                        if rsrp_raw != 0x80:
+                            rec["rsrp_dbm"] = rsrp_raw - 140
+                        if rsrq_raw != 0x80:
+                            rec["rsrq_db"] = rsrq_raw / 2 - 19.5
+
+                elif event_id == 0x34:  # RRC_SCG_FAILURE_INFORMATION_NR
+                    rec["scg_failure"] = 1
+                    rec["event_type"] = "NR_SCG_FAILURE"
+
+                elif event_id in (0x1e, 0x1f):  # RLF / re-establishment
+                    rec["rlf_flag"] = 1
+                    rec["event_type"] = "RRC_RLF"
+
+                records.append(rec)
+
+        offset += rec_len
+
+    if not records:
+        logger.info("No relevant binary CTR events found in %s", filename)
+        return _empty_df()
+
+    df = pd.DataFrame(records)
+    for col in _empty_df().columns:
+        if col not in df.columns:
+            df[col] = np.nan if col not in {"event_type", "event_cause", "source_file"} else ""
+
+    logger.info("Binary CTR %s: parsed %d events", filename, len(df))
     return df[_empty_df().columns]
