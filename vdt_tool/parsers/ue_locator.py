@@ -1,62 +1,46 @@
 """
-UE position estimation from RSRP + cell metadata.
+UE position estimation — weighted centroid of observed cells.
 
-Estimates UE distance from the serving cell using a log-distance path loss
-model, then projects the position along the cell azimuth at that distance.
+Algorithm
+---------
+For each sample belonging to a known UE (RNTI ≠ 0):
+  1. Collect every serving-cell measurement from the same RNTI within
+     ±window_ms of this sample's timestamp.
+  2. For each unique cell seen in that window, keep the strongest RSRP.
+  3. Convert RSRP to linear power:  w = 10^(RSRP_dBm / 10)
+  4. UE position = weighted centroid of those cell tower positions.
 
-Path loss model:  PL(d) = PL(d0) + 10·n·log10(d/d0)
-Typical macro LTE: n=3.5, RSRP_ref=-65 dBm at d0=100 m (46 dBm TX, 1800 MHz)
+Why this is correct
+-------------------
+RSRP gives *distance* but no *direction*. The azimuth of the serving
+sector is irrelevant — the UE can be anywhere around the tower.
+The weighted centroid places the UE between all measured cells, pulled
+toward whichever tower is strongest at that moment. When only one cell
+is visible the position lands at that tower; across a handover it
+smoothly transitions between the two towers.
+
+Fallback
+--------
+Samples with RNTI=0 (RLF, SCG events, per-radio measurements) have no
+UE context, so they are placed at the serving cell site (tower lat/lon).
 """
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
 
-# ── Constants ────────────────────────────────────────────────────────────────
-
-_N = 3.5          # path loss exponent (urban/suburban macro)
-_RSRP_REF = -65.0  # dBm at d_ref
-_D_REF = 100.0     # metres
-_D_MIN = 50.0      # clamp min
-_D_MAX = 15_000.0  # clamp max
-_R_EARTH = 6_371_000.0
+_R_EARTH = 6_371_000.0          # metres
 
 
-def rsrp_to_distance(rsrp_dbm: float) -> float:
-    """Estimate distance in metres from RSRP (dBm) via log-distance path loss."""
-    if not math.isfinite(rsrp_dbm):
-        return _D_MIN
-    d = _D_REF * 10 ** ((_RSRP_REF - rsrp_dbm) / (10.0 * _N))
-    return float(np.clip(d, _D_MIN, _D_MAX))
-
-
-def offset_position(lat: float, lon: float, bearing_deg: float, dist_m: float) -> Tuple[float, float]:
-    """
-    Return (lat, lon) of a point dist_m metres from (lat, lon)
-    along bearing_deg (degrees clockwise from North).
-    """
-    b = math.radians(bearing_deg)
-    lat1 = math.radians(lat)
-    lon1 = math.radians(lon)
-    dr = dist_m / _R_EARTH
-    lat2 = math.asin(
-        math.sin(lat1) * math.cos(dr)
-        + math.cos(lat1) * math.sin(dr) * math.cos(b)
-    )
-    lon2 = lon1 + math.atan2(
-        math.sin(b) * math.sin(dr) * math.cos(lat1),
-        math.cos(dr) - math.sin(lat1) * math.sin(lat2),
-    )
-    return math.degrees(lat2), math.degrees(lon2)
-
+# ── Cell DB ──────────────────────────────────────────────────────────────────
 
 def build_cell_db(cell_meta_df: pd.DataFrame) -> Dict[int, dict]:
     """
     Build {cell_id: {lat, lon, azimuth, site}} from a cell metadata DataFrame.
 
-    Supports the Ericsson DB.csv column layout:
+    Supports the Ericsson DB.csv layout:
         eNBId, Cellid1, Latitude, Longitude, Azimuth, Site
 
     cell_id key = eNBId * 1000 + Cellid1  (matches binary CTR parser encoding)
@@ -82,8 +66,7 @@ def build_cell_db(cell_meta_df: pd.DataFrame) -> Dict[int, dict]:
             rename[col] = 'site'
 
     df = cell_meta_df.rename(columns=rename)
-
-    if not {'enb_id', 'local_cell', 'lat', 'lon', 'azimuth'}.issubset(df.columns):
+    if not {'enb_id', 'local_cell', 'lat', 'lon'}.issubset(df.columns):
         return db
 
     for _, row in df.iterrows():
@@ -92,7 +75,7 @@ def build_cell_db(cell_meta_df: pd.DataFrame) -> Dict[int, dict]:
             db[cid] = {
                 'lat':     float(row['lat']),
                 'lon':     float(row['lon']),
-                'azimuth': float(row['azimuth']),
+                'azimuth': float(row.get('azimuth', 0)),
                 'site':    str(row.get('site', '')),
             }
         except (ValueError, KeyError, TypeError):
@@ -101,56 +84,123 @@ def build_cell_db(cell_meta_df: pd.DataFrame) -> Dict[int, dict]:
     return db
 
 
+# ── Weighted centroid ────────────────────────────────────────────────────────
+
+def _weighted_centroid(
+    cell_rsrp: Dict[int, float],
+    cell_db: Dict[int, dict],
+) -> Tuple[float, float]:
+    """
+    Return (lat, lon) as a linear-power-weighted centroid of the given cells.
+
+    cell_rsrp: {cell_id → best RSRP in dBm}
+    """
+    lat_acc = lon_acc = w_acc = 0.0
+    for cid, rsrp in cell_rsrp.items():
+        cell = cell_db.get(cid)
+        if cell is None:
+            continue
+        w = 10 ** (rsrp / 10.0)          # dBm → linear power
+        lat_acc += w * cell['lat']
+        lon_acc += w * cell['lon']
+        w_acc   += w
+    if w_acc == 0:
+        return math.nan, math.nan
+    return lat_acc / w_acc, lon_acc / w_acc
+
+
 def apply_ue_localization(
     df: pd.DataFrame,
     cell_db: Dict[int, dict],
-    default_dist_m: float = 500.0,
+    window_ms: int = 15_000,
 ) -> pd.DataFrame:
     """
-    Add or fill 'latitude' / 'longitude' columns using RSRP-based positioning.
+    Add 'latitude' and 'longitude' to df using RSRP weighted-centroid positioning.
 
-    Algorithm per row:
-      1. Look up serving cell in cell_db by cell_id
-      2. If RSRP available  → d = rsrp_to_distance(rsrp_dbm)
-         Else (RLF / events) → d = default_dist_m
-      3. lat, lon = offset_position(cell_lat, cell_lon, azimuth, d)
+    Parameters
+    ----------
+    df         : DataFrame from parse_ctrace_binary / parse_ctrace
+    cell_db    : lookup built by build_cell_db()
+    window_ms  : half-width of the sliding time window (default 15 s)
 
-    Rows already having a non-NaN lat/lon are left unchanged.
+    Returns
+    -------
+    df with 'latitude' and 'longitude' columns populated.
     """
     if df.empty or not cell_db:
         return df
 
     df = df.copy()
-    if 'latitude' not in df.columns:
-        df['latitude'] = np.nan
-    if 'longitude' not in df.columns:
-        df['longitude'] = np.nan
+    df['latitude']  = np.nan
+    df['longitude'] = np.nan
 
-    needs_pos = df['latitude'].isna()
-    if not needs_pos.any():
-        return df
+    ts_arr    = df['timestamp_ms'].to_numpy(dtype=float)
+    cell_arr  = df['cell_id'].to_numpy()
+    rsrp_arr  = df['rsrp_dbm'].to_numpy(dtype=float) if 'rsrp_dbm' in df.columns else np.full(len(df), np.nan)
+    rnti_arr  = df['rnti'].to_numpy()   if 'rnti'   in df.columns else np.zeros(len(df))
+    lats      = np.full(len(df), np.nan)
+    lons      = np.full(len(df), np.nan)
 
-    lats = df['latitude'].to_numpy(dtype=float, na_value=np.nan).copy()
-    lons = df['longitude'].to_numpy(dtype=float, na_value=np.nan).copy()
-    cell_ids = df['cell_id'].to_numpy()
-    rsrps = df['rsrp_dbm'].to_numpy(dtype=float, na_value=np.nan).copy() if 'rsrp_dbm' in df.columns else np.full(len(df), np.nan)
+    # ── Pass 1: RNTI-aware windowed centroid ─────────────────────────────────
+    # Group indices by RNTI (skip RNTI=0)
+    rnti_groups: Dict[int, list] = {}
+    for i, r in enumerate(rnti_arr):
+        ri = int(r)
+        if ri == 0:
+            continue
+        rnti_groups.setdefault(ri, []).append(i)
 
-    for i, need in enumerate(needs_pos):
-        if not need:
+    for rnti, indices in rnti_groups.items():
+        indices.sort(key=lambda i: ts_arr[i])
+        ts_rnti = [ts_arr[i] for i in indices]
+
+        # Sliding window: for each sample find all indices within ±window_ms
+        lo = hi = 0
+        for pos, i in enumerate(indices):
+            t = ts_rnti[pos]
+
+            # Advance lo until ts >= t - window_ms
+            while lo < len(indices) and ts_rnti[lo] < t - window_ms:
+                lo += 1
+            # Advance hi until ts > t + window_ms
+            while hi < len(indices) and ts_rnti[hi] <= t + window_ms:
+                hi += 1
+
+            # Collect best RSRP per cell in window
+            cell_rsrp: Dict[int, float] = {}
+            for j in indices[lo:hi]:
+                try:
+                    cid = int(cell_arr[j])
+                except (ValueError, TypeError):
+                    continue
+                if cid not in cell_db:
+                    continue
+                rsrp = rsrp_arr[j]
+                if math.isfinite(rsrp):
+                    if cid not in cell_rsrp or rsrp > cell_rsrp[cid]:
+                        cell_rsrp[cid] = rsrp
+
+            if not cell_rsrp:
+                continue
+
+            lat, lon = _weighted_centroid(cell_rsrp, cell_db)
+            lats[i] = lat
+            lons[i] = lon
+
+    # ── Pass 2: fallback — serving cell site for remaining samples ───────────
+    for i in range(len(df)):
+        if math.isfinite(lats[i]):
             continue
         try:
-            cid = int(cell_ids[i])
+            cid = int(cell_arr[i])
         except (ValueError, TypeError):
             continue
         cell = cell_db.get(cid)
         if cell is None:
             continue
-        rsrp = rsrps[i]
-        dist = rsrp_to_distance(float(rsrp)) if math.isfinite(rsrp) else default_dist_m
-        lat, lon = offset_position(cell['lat'], cell['lon'], cell['azimuth'], dist)
-        lats[i] = lat
-        lons[i] = lon
+        lats[i] = cell['lat']
+        lons[i] = cell['lon']
 
-    df['latitude'] = lats
+    df['latitude']  = lats
     df['longitude'] = lons
     return df

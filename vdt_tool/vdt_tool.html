@@ -622,48 +622,89 @@ function parseCellMetaCsv(text) {
   }).filter(r => isFinite(r.lat) && isFinite(r.lon));
 }
 
-// ── UE position estimation (RSRP log-distance path loss) ─────────────────────
-// n=3.5, RSRP_ref=-65 dBm at d_ref=100m (LTE macro ~46 dBm TX, 1800 MHz)
+// ── UE position estimation (RSRP weighted centroid) ──────────────────────────
+// For each RNTI group: sliding ±window_ms window → best RSRP per cell →
+// weighted centroid (w = 10^(rsrp/10), linear power).  No azimuth involved.
+// Fallback for RNTI=0 samples: placed at serving cell tower lat/lon.
 
-const _UE_N = 3.5, _UE_RSRP_REF = -65, _UE_D_REF = 100;
-const _UE_D_MIN = 50, _UE_D_MAX = 15000, _UE_R = 6371000;
+const _UE_WINDOW_MS = 15000;
 
 function buildCellDb(cellMeta) {
   const db = {};
   for (const c of cellMeta) {
     if (c.cell_id && isFinite(c.lat) && isFinite(c.lon))
-      db[c.cell_id] = { lat: c.lat, lon: c.lon, az: c.az, site: c.site };
+      db[c.cell_id] = { lat: c.lat, lon: c.lon, site: c.site };
   }
   return db;
 }
 
-function _rsrpToDist(rsrp) {
-  if (!isFinite(rsrp)) return _UE_D_MIN;
-  const d = _UE_D_REF * Math.pow(10, (_UE_RSRP_REF - rsrp) / (10 * _UE_N));
-  return Math.max(_UE_D_MIN, Math.min(_UE_D_MAX, d));
+function _weightedCentroid(cellRsrp, cellDb) {
+  let latAcc = 0, lonAcc = 0, wAcc = 0;
+  for (const [cid, rsrp] of Object.entries(cellRsrp)) {
+    const cell = cellDb[cid];
+    if (!cell) continue;
+    const w = Math.pow(10, rsrp / 10);
+    latAcc += w * cell.lat;
+    lonAcc += w * cell.lon;
+    wAcc   += w;
+  }
+  if (wAcc === 0) return null;
+  return { lat: latAcc / wAcc, lon: lonAcc / wAcc };
 }
 
-function _offsetPos(lat, lon, azDeg, distM) {
-  const b = azDeg * Math.PI / 180;
-  const lat1 = lat * Math.PI / 180, lon1 = lon * Math.PI / 180;
-  const dr = distM / _UE_R;
-  const lat2 = Math.asin(Math.sin(lat1)*Math.cos(dr) + Math.cos(lat1)*Math.sin(dr)*Math.cos(b));
-  const lon2 = lon1 + Math.atan2(Math.sin(b)*Math.sin(dr)*Math.cos(lat1),
-                                  Math.cos(dr) - Math.sin(lat1)*Math.sin(lat2));
-  return { lat: lat2 * 180/Math.PI, lon: lon2 * 180/Math.PI };
-}
+function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
+  // Group by RNTI (skip 0)
+  const groups = {};
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    const rnti = s.rnti || 0;
+    if (rnti === 0) continue;
+    if (!groups[rnti]) groups[rnti] = [];
+    groups[rnti].push(i);
+  }
 
-function applyUeLocalization(samples, cellDb) {
+  // Pass 1: windowed weighted centroid per RNTI
+  for (const [, indices] of Object.entries(groups)) {
+    indices.sort((a, b) => samples[a].timestamp_ms - samples[b].timestamp_ms);
+    const ts = indices.map(i => samples[i].timestamp_ms);
+    let lo = 0, hi = 0;
+    for (let pos = 0; pos < indices.length; pos++) {
+      const t = ts[pos];
+      while (lo < indices.length && ts[lo] < t - windowMs) lo++;
+      while (hi < indices.length && ts[hi] <= t + windowMs) hi++;
+
+      const cellRsrp = {};
+      for (let k = lo; k < hi; k++) {
+        const s = samples[indices[k]];
+        const cid = String(s.cell_id);
+        if (!cellDb[cid]) continue;
+        const rsrp = s.rsrp_dbm;
+        if (rsrp != null && isFinite(rsrp)) {
+          if (cellRsrp[cid] == null || rsrp > cellRsrp[cid])
+            cellRsrp[cid] = rsrp;
+        }
+      }
+
+      if (Object.keys(cellRsrp).length === 0) continue;
+      const s = samples[indices[pos]];
+      if (s.latitude != null) continue;  // keep GPS if already set
+      const pos2 = _weightedCentroid(cellRsrp, cellDb);
+      if (pos2) {
+        s.latitude  = pos2.lat;
+        s.longitude = pos2.lon;
+      }
+    }
+  }
+
+  // Pass 2: fallback — place RNTI=0 / unpositioned at serving cell tower
   for (const s of samples) {
     if (s.latitude != null) continue;
-    const cell = cellDb[s.cell_id];
+    const cell = cellDb[String(s.cell_id)];
     if (!cell) continue;
-    const dist = (s.rsrp_dbm != null && isFinite(s.rsrp_dbm))
-      ? _rsrpToDist(s.rsrp_dbm) : 500;
-    const pos = _offsetPos(cell.lat, cell.lon, cell.az, dist);
-    s.latitude  = pos.lat;
-    s.longitude = pos.lon;
+    s.latitude  = cell.lat;
+    s.longitude = cell.lon;
   }
+
   return samples;
 }
 
