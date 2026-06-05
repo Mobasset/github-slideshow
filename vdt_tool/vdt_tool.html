@@ -114,8 +114,8 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
     <div class="sec-hdr">Input Files</div>
 
     <div class="input-block">
-      <div class="input-label">Cell Trace <span class="fmt-hint">.bin.gz · .csv</span></div>
-      <label class="up-row"><input type="file" id="file-celltrace" accept=".gz,.csv" style="display:none">
+      <div class="input-label">Cell Trace <span class="fmt-hint">.bin.gz · .csv.gz · .csv</span></div>
+      <label class="up-row"><input type="file" id="file-celltrace" accept=".gz,.csv,.bin" style="display:none">
         <span class="up-icon">📡</span><span class="up-name" id="fname-celltrace">No file selected</span></label>
     </div>
     <div class="input-block">
@@ -1199,7 +1199,8 @@ function renderHeatmap(samples) {
   let pts = samples.map(s => {
     const v = s[metric];
     if (!isFinite(v)) return null;
-    const w = Math.max(0, Math.min(1, (v-vmin)/(vmax-vmin)));
+    const range = vmax - vmin || 1;
+    const w = Math.max(0, Math.min(1, (v - vmin) / range));
     return [s.latitude, s.longitude, w];
   }).filter(Boolean);
   if (pts.length > 15000) { const step=Math.ceil(pts.length/15000); pts=pts.filter((_,i)=>i%step===0); }
@@ -1229,9 +1230,9 @@ function renderEventMarkers(samples) {
   const evts = samples.filter(s=>s.event_type && EVENT_COLORS[s.event_type]);
   evts.forEach(s => {
     const color = EVENT_COLORS[s.event_type];
-    const sym = { INTERNAL_HANDOVER_FAILURE:'✕', RRC_RLF:'☠', NR_SCG_FAILURE:'⚠', INTERNAL_HANDOVER_SUCCESS:'✓', A3_TRIGGER:'▶', A5_TRIGGER:'◀', INTERNAL_HANDOVER_ATTEMPT:'◈' };
+    const sym = { INTERNAL_HANDOVER_FAILURE:'✕', RRC_RLF:'☠', NR_SCG_FAILURE:'⚠', INTERNAL_HANDOVER_SUCCESS:'✓', A3_TRIGGER:'▶', A5_TRIGGER:'◀', INTERNAL_HANDOVER_ATTEMPT:'◈', RRC_MEASUREMENT_REPORT:'·', INTERNAL_EVENT_UE_MOBILITY_EVAL:'◎', INTERNAL_PER_RADIO_UE_MEASUREMENT:'~' };
     const icon = L.divIcon({
-      html:`<div style="background:${color};color:#fff;border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:10px;border:1.5px solid rgba(255,255,255,.5)">${sym[s.event_type]||'!'}</div>`,
+      html:`<div style="background:${color||'#888'};color:#fff;border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:10px;border:1.5px solid rgba(255,255,255,.5)">${sym[s.event_type]||'!'}</div>`,
       className:'', iconSize:[18,18], iconAnchor:[9,9]
     });
     const m = L.marker([s.latitude,s.longitude],{icon});
@@ -1244,7 +1245,7 @@ function renderEventMarkers(samples) {
 
 function renderSectors() {
   sectorPolys = L.layerGroup();
-  const samples = state.filtered;
+  const samples = state.samples;
   for (const site of state.cellMeta) {
     if (!isFinite(site.lat)||!isFinite(site.lon)) continue;
     // Compute median RSRP in wedge
@@ -1505,8 +1506,10 @@ function populateCellFilter(samples) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function loadData(newSamples, cellMeta=null) {
-  if (cellMeta) state.cellMeta = cellMeta;
-  // Merge with existing
+  if (cellMeta) {
+    state.cellMeta = cellMeta;
+    state.cellDb   = buildCellDb(cellMeta);
+  }
   if (newSamples.length) {
     state.samples = [...state.samples, ...newSamples];
   }
@@ -1515,7 +1518,9 @@ function loadData(newSamples, cellMeta=null) {
   updateKpiPanel(computeKpis(state.filtered));
   renderAll();
   renderTimeline(state.filtered);
-  setStatus(`Loaded ${state.samples.length.toLocaleString()} samples`);
+  const pos = state.samples.filter(s => s.latitude != null).length;
+  const posStr = pos ? ` | ${pos.toLocaleString()} positioned` : '';
+  setStatus(`Loaded ${state.samples.length.toLocaleString()} samples${posStr}`);
 }
 
 function clearAll() {
@@ -1786,7 +1791,7 @@ document.getElementById('chk-events').addEventListener('change', renderAll);
 document.getElementById('sel-tilestyle').addEventListener('change', e => switchTile(e.target.value));
 
 document.getElementById('rsrp-thresh').addEventListener('input', e => {
-  document.getElementById('rsrp-thresh-val').textContent = '−' + Math.abs(e.target.value);
+  document.getElementById('rsrp-thresh-val').textContent = e.target.value;
   refreshFilters();
 });
 document.getElementById('sel-cell-filter').addEventListener('change', refreshFilters);
