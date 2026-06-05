@@ -1,0 +1,1356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VDT Tool — Virtual Drive Test</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.heat/0.2.0/leaflet-heat.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:#1a1a2e;color:#e0e0e0;font-family:Inter,Roboto,sans-serif;font-size:13px}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:#1a1a2e}
+::-webkit-scrollbar-thumb{background:#0f3460;border-radius:3px}
+
+#layout{display:flex;flex-direction:row;height:100vh}
+
+/* ── Sidebar ── */
+#sidebar{width:270px;min-width:270px;height:100vh;overflow-y:auto;padding:10px 9px;background:#1a1a2e;border-right:1px solid #2a2a4a;flex-shrink:0}
+.logo{margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #2a2a4a}
+.logo-vdt{color:#e94560;font-weight:900;font-size:20px;font-family:monospace}
+.logo-sub{color:#888;font-size:9px;letter-spacing:2px;text-transform:uppercase;margin-top:1px}
+.sec-hdr{color:#e94560;font-size:10px;font-weight:bold;text-transform:uppercase;letter-spacing:1px;margin:8px 0 5px;border-bottom:1px solid #2a2a4a;padding-bottom:3px}
+.upload-zone{border:1px dashed #0f3460;border-radius:4px;padding:6px 8px;margin-bottom:5px;text-align:center;cursor:pointer;background:rgba(15,52,96,.3);color:#888;font-size:11px;transition:border-color .2s}
+.upload-zone:hover{border-color:#e94560;color:#e0e0e0}
+.upload-zone input{display:none}
+.btn-demo{width:100%;padding:6px;background:#e94560;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;margin-bottom:4px}
+.btn-demo:hover{background:#c73652}
+.btn-clear{width:100%;padding:5px;background:transparent;color:#888;border:1px solid #2a2a4a;border-radius:4px;cursor:pointer;font-size:11px}
+.btn-clear:hover{color:#e0e0e0;border-color:#888}
+.kpi-label{color:#888;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.kpi-val{font-family:monospace;font-size:14px;font-weight:bold;margin-bottom:4px}
+.radio-grp label{display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:12px;cursor:pointer}
+.radio-grp input{accent-color:#e94560}
+.chk-grp label{display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:12px;cursor:pointer}
+.chk-grp input{accent-color:#e94560}
+select,input[type=range]{width:100%;background:#16213e;color:#e0e0e0;border:1px solid #2a2a4a;border-radius:3px;padding:4px 6px;font-size:11px;margin-bottom:6px}
+select option{background:#16213e}
+.range-row{display:flex;justify-content:space-between;font-size:9px;color:#888;margin-top:-4px;margin-bottom:4px}
+.export-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px}
+.btn-exp{background:#0f3460;color:#fff;border:none;border-radius:3px;padding:5px 4px;cursor:pointer;font-size:11px;font-weight:bold;width:100%}
+.btn-exp:hover{background:#1a4a8a}
+.btn-exp.red{background:#e94560}.btn-exp.red:hover{background:#c73652}
+#status-bar{font-size:10px;color:#888;margin-top:6px;word-break:break-word}
+
+/* ── Main ── */
+#main{flex:1;display:flex;flex-direction:column;height:100vh;min-width:0}
+#map-container{flex:1;min-height:0;position:relative}
+#map{width:100%;height:100%}
+
+/* ── Legend ── */
+#map-legend{position:absolute;bottom:30px;right:10px;background:rgba(22,33,62,.9);border:1px solid #2a2a4a;border-radius:5px;padding:8px 10px;z-index:999;font-size:10px;min-width:110px}
+.legend-row{display:flex;align-items:center;gap:6px;margin-bottom:3px}
+.legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+
+/* ── Timeline panel ── */
+#timeline-panel{height:240px;min-height:240px;background:#16213e;border-top:1px solid #2a2a4a;flex-shrink:0;display:flex;flex-direction:column}
+#timeline-header{display:flex;align-items:center;justify-content:space-between;padding:4px 10px;background:#0f3460;cursor:pointer;user-select:none}
+#timeline-header span{font-size:11px;font-weight:bold;color:#e94560}
+#timeline-header small{color:#888;font-size:10px}
+#btn-collapse{background:none;border:none;color:#888;cursor:pointer;font-size:13px;padding:0 4px}
+#timeline-body{flex:1;min-height:0}
+#timeline-chart{width:100%;height:100%}
+
+/* ── Detail panel ── */
+#detail-panel{width:290px;min-width:290px;height:100vh;overflow-y:auto;padding:10px 9px;background:#1a1a2e;border-left:1px solid #2a2a4a;display:none;flex-shrink:0}
+#detail-panel h3{color:#e94560;font-size:12px;margin-bottom:8px;border-bottom:1px solid #2a2a4a;padding-bottom:5px}
+#detail-content .kpi-val{font-size:12px}
+table.per-cell{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px}
+table.per-cell th{background:#0f3460;color:#e0e0e0;padding:4px 5px;text-align:left;white-space:nowrap;font-weight:bold}
+table.per-cell td{padding:3px 5px;border-bottom:1px solid #2a2a4a;font-family:monospace;white-space:nowrap}
+table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
+.close-btn{float:right;background:none;border:none;color:#888;cursor:pointer;font-size:16px;line-height:1}
+.close-btn:hover{color:#e94560}
+
+/* Leaflet popup dark */
+.leaflet-popup-content-wrapper{background:#16213e;color:#e0e0e0;border:1px solid #2a2a4a;box-shadow:none}
+.leaflet-popup-tip{background:#16213e}
+.leaflet-popup-content{font-size:11px;font-family:monospace;margin:8px 10px}
+.leaflet-control-zoom a{background:#16213e!important;color:#e0e0e0!important;border-color:#2a2a4a!important}
+.leaflet-control-layers{background:#16213e!important;color:#e0e0e0!important;border:1px solid #2a2a4a!important}
+.leaflet-control-layers-toggle{background-color:#0f3460}
+.leaflet-control-attribution{background:rgba(22,33,62,.7)!important;color:#666!important}
+.leaflet-control-attribution a{color:#888!important}
+</style>
+</head>
+<body>
+<div id="layout">
+
+  <!-- ══ SIDEBAR ══════════════════════════════════════════════════════════ -->
+  <div id="sidebar">
+    <div class="logo">
+      <span class="logo-vdt">VDT</span><span style="color:#e0e0e0;font-size:14px;font-family:monospace"> TOOL</span>
+      <div class="logo-sub">Virtual Drive Test</div>
+    </div>
+
+    <div class="sec-hdr">Input Files</div>
+
+    <label class="upload-zone"><input type="file" id="file-l3" accept=".log,.txt,.pcap">4G/5G RRC Log (.log / .txt)</label>
+    <label class="upload-zone"><input type="file" id="file-events" accept=".csv,.log,.txt">Events CSV / Log</label>
+    <label class="upload-zone"><input type="file" id="file-gps" accept=".csv,.kml,.gpx">GPS Track (CSV / KML / GPX)</label>
+    <label class="upload-zone"><input type="file" id="file-meta" accept=".csv">Cell Metadata CSV</label>
+
+    <button class="btn-demo" id="btn-demo">▶ Load Demo Data</button>
+    <button class="btn-clear" id="btn-clear">Clear All</button>
+
+    <div class="sec-hdr">KPIs</div>
+    <div id="kpi-panel">
+      <div style="color:#888;font-size:11px">No data loaded.</div>
+    </div>
+
+    <div class="sec-hdr">Visualization Mode</div>
+    <div class="radio-grp">
+      <label><input type="radio" name="viz" value="dots" checked> Colored Dots</label>
+      <label><input type="radio" name="viz" value="heatmap"> Heatmap</label>
+      <label><input type="radio" name="viz" value="cluster"> Event Clusters</label>
+    </div>
+
+    <div class="sec-hdr">Metric (Heatmap)</div>
+    <select id="sel-metric">
+      <option value="rsrp_dbm">RSRP (dBm)</option>
+      <option value="rsrq_db">RSRQ (dB)</option>
+      <option value="sinr_db">SINR (dB)</option>
+      <option value="throughput_dl_mbps">DL Throughput (Mbps)</option>
+    </select>
+
+    <div class="sec-hdr">Overlays</div>
+    <div class="chk-grp">
+      <label><input type="checkbox" id="chk-track"> GPS Track</label>
+      <label><input type="checkbox" id="chk-sites"> eNB Sites</label>
+      <label><input type="checkbox" id="chk-sectors"> Sector Wedges</label>
+      <label><input type="checkbox" id="chk-events" checked> Event Markers</label>
+    </div>
+
+    <div class="sec-hdr">Map Style</div>
+    <select id="sel-tilestyle">
+      <option value="dark">CartoDB Dark Matter</option>
+      <option value="light">CartoDB Positron</option>
+      <option value="osm">OpenStreetMap</option>
+      <option value="topo">OpenTopoMap</option>
+    </select>
+
+    <div class="sec-hdr">Filters</div>
+    <label style="font-size:10px;color:#888">RSRP Threshold (dBm): <span id="rsrp-thresh-val">−140</span></label>
+    <input type="range" id="rsrp-thresh" min="-140" max="-40" step="5" value="-140">
+    <div class="range-row"><span>−140</span><span>−40</span></div>
+
+    <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Filter by Cell ID</label>
+    <select id="sel-cell-filter" multiple style="height:60px;margin-bottom:6px"></select>
+
+    <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Technology</label>
+    <select id="sel-tech" multiple style="height:50px;margin-bottom:6px">
+      <option value="LTE">LTE</option>
+      <option value="NR">NR (5G)</option>
+      <option value="2G">2G</option>
+    </select>
+
+    <div class="sec-hdr">Export</div>
+    <div class="export-grid">
+      <button class="btn-exp" id="btn-csv">CSV</button>
+      <button class="btn-exp" id="btn-geojson">GeoJSON</button>
+      <button class="btn-exp" id="btn-kml">KML</button>
+      <button class="btn-exp red" id="btn-print">Print PDF</button>
+    </div>
+
+    <div id="status-bar"></div>
+  </div>
+
+  <!-- ══ MAIN ════════════════════════════════════════════════════════════ -->
+  <div id="main">
+    <div id="map-container">
+      <div id="map"></div>
+      <div id="map-legend">
+        <div style="color:#e94560;font-weight:bold;font-size:10px;margin-bottom:4px">RSRP</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#2ecc71"></div>Excellent ≥ −80</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#a8d08d"></div>Good −80 to −90</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#f0a500"></div>Fair −90 to −100</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#e06000"></div>Poor −100 to −110</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#c0392b"></div>Bad &lt; −110</div>
+      </div>
+    </div>
+
+    <div id="timeline-panel">
+      <div id="timeline-header">
+        <div><span>Timeline</span> <small>— RSRP / SINR / Events</small></div>
+        <button id="btn-collapse">▼</button>
+      </div>
+      <div id="timeline-body">
+        <div id="timeline-chart"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ DETAIL PANEL ════════════════════════════════════════════════════ -->
+  <div id="detail-panel">
+    <h3><button class="close-btn" id="btn-close-detail">✕</button>Sample Detail</h3>
+    <div id="detail-content"></div>
+    <div class="sec-hdr" style="margin-top:10px">Per-Cell Table</div>
+    <div id="per-cell-wrap" style="overflow-x:auto"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const THEME = { bg:'#1a1a2e', panel:'#16213e', accent:'#0f3460', hl:'#e94560', text:'#e0e0e0', muted:'#888', border:'#2a2a4a' };
+
+const RSRP_BINS = [
+  { min:-80,  max:Infinity, label:'Excellent', color:'#2ecc71' },
+  { min:-90,  max:-80,      label:'Good',      color:'#a8d08d' },
+  { min:-100, max:-90,      label:'Fair',       color:'#f0a500' },
+  { min:-110, max:-100,     label:'Poor',       color:'#e06000' },
+  { min:-Infinity, max:-110, label:'Bad',       color:'#c0392b' },
+];
+
+const EVENT_COLORS = {
+  INTERNAL_HANDOVER_ATTEMPT:  '#3498db',
+  INTERNAL_HANDOVER_SUCCESS:  '#2ecc71',
+  INTERNAL_HANDOVER_FAILURE:  '#e74c3c',
+  RRC_RLF:                    '#8e44ad',
+  NR_SCG_FAILURE:             '#f39c12',
+  A3_TRIGGER:                 '#1abc9c',
+  A5_TRIGGER:                 '#e67e22',
+};
+
+const TILE_LAYERS = {
+  dark:  { url:'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',   attr:'© CartoDB' },
+  light: { url:'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',  attr:'© CartoDB' },
+  osm:   { url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',              attr:'© OpenStreetMap' },
+  topo:  { url:'https://{a,b,c}.tile.opentopomap.org/{z}/{x}/{y}.png',            attr:'© OpenTopoMap' },
+};
+
+const CENTER = [23.5880, 58.3829]; // Muscat, Oman
+const EARTH_R = 6371000;
+const N_DEMO  = 2000;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let state = {
+  samples:  [],   // unified array of sample objects
+  cellMeta: [],   // cell metadata objects
+  filtered: [],   // filtered view of samples
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SEEDED PRNG (LCG) for reproducible demo data
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function makePRNG(seed) {
+  let s = seed >>> 0;
+  return {
+    rand() { s = (Math.imul(1664525, s) + 1013904223) >>> 0; return s / 4294967296; },
+    // Box-Muller normal distribution
+    randn(mu=0, sigma=1) {
+      const u = this.rand() || 1e-10, v = this.rand();
+      return mu + sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    },
+    randInt(lo, hi) { return lo + Math.floor(this.rand() * (hi - lo)); },
+    choice(arr, n) {
+      const copy = [...arr]; const out = [];
+      for (let i = 0; i < n; i++) {
+        const j = this.randInt(i, copy.length);
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+        out.push(copy[i]);
+      }
+      return out;
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEMO DATA GENERATOR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const DEMO_SITES = [
+  { cell_id:10101, site:'MUSCAT_CBD_1', lat:23.5880, lon:58.3829, az:0,   pci:42, earfcn:1300,   band:'B3',  tech:'LTE' },
+  { cell_id:10102, site:'MUSCAT_CBD_1', lat:23.5880, lon:58.3829, az:120, pci:43, earfcn:1300,   band:'B3',  tech:'LTE' },
+  { cell_id:10103, site:'MUSCAT_CBD_1', lat:23.5880, lon:58.3829, az:240, pci:44, earfcn:1300,   band:'B3',  tech:'LTE' },
+  { cell_id:10201, site:'MUSCAT_RDC_2', lat:23.5950, lon:58.3920, az:10,  pci:51, earfcn:3050,   band:'B7',  tech:'LTE' },
+  { cell_id:10202, site:'MUSCAT_RDC_2', lat:23.5950, lon:58.3920, az:130, pci:52, earfcn:3050,   band:'B7',  tech:'LTE' },
+  { cell_id:10203, site:'MUSCAT_RDC_2', lat:23.5950, lon:58.3920, az:250, pci:53, earfcn:3050,   band:'B7',  tech:'LTE' },
+  { cell_id:10301, site:'MUSCAT_GRN_3', lat:23.5810, lon:58.3760, az:30,  pci:61, earfcn:627980, band:'n78', tech:'NR'  },
+  { cell_id:10302, site:'MUSCAT_GRN_3', lat:23.5810, lon:58.3760, az:150, pci:62, earfcn:627980, band:'n78', tech:'NR'  },
+  { cell_id:10303, site:'MUSCAT_GRN_3', lat:23.5810, lon:58.3760, az:270, pci:63, earfcn:627980, band:'n78', tech:'NR'  },
+];
+
+const PRIMARY_SITES = [
+  { cell_id:10101, lat:23.5880, lon:58.3829 },
+  { cell_id:10201, lat:23.5950, lon:58.3920 },
+  { cell_id:10301, lat:23.5810, lon:58.3760 },
+];
+
+function haversineM(lat1,lon1,lat2,lon2) {
+  const R=EARTH_R, dLat=(lat2-lat1)*Math.PI/180, dLon=(lon2-lon1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(a));
+}
+
+function logDistRsrp(dist, shadow=0) {
+  const d = Math.max(dist, 10);
+  const fspl = 20*Math.log10(2600e6) + 20*Math.log10(d) - 147.55;
+  const pl = fspl + (3.5-2)*10*Math.log10(d/100);
+  return Math.max(-140, Math.min(-40, 46+18-pl+shadow));
+}
+
+function generateDemoData() {
+  const rng = makePRNG(42);
+  const baseTs = new Date('2024-01-15T08:00:00Z').getTime();
+  const R = 800, samples = [];
+
+  // Generate spatially-correlated shadow fading (simple moving average)
+  const rawShadow = Array.from({length:N_DEMO}, () => rng.randn(0,8));
+  const shadow = rawShadow.map((_,i,a) => {
+    const win = a.slice(Math.max(0,i-19), i+1);
+    return win.reduce((s,v)=>s+v,0)/win.length;
+  });
+
+  const t = Array.from({length:N_DEMO}, (_,i) => i * 2*Math.PI / N_DEMO);
+
+  // Lissajous-8 route
+  const lats = t.map(ti => CENTER[0] + (R/EARTH_R)*(180/Math.PI)*Math.sin(ti)    + rng.randn(0,0.0002));
+  const lons = t.map(ti => CENTER[1] + (R/EARTH_R)*(180/Math.PI)*Math.cos(2*ti)/Math.cos(CENTER[0]*Math.PI/180) + rng.randn(0,0.0002));
+
+  // Event injection indices
+  const hoIdx   = rng.choice([...Array(N_DEMO).keys()], 12);
+  const rlfIdx  = rng.choice([...Array(N_DEMO).keys()].sort((a,b)=>a-b).slice(0,50), 3);
+  const scgIdx  = rng.choice([...Array(N_DEMO).keys()], 2);
+  const a3Idx   = rng.choice([...Array(N_DEMO).keys()], 8);
+  const eventMap = {};
+  hoIdx.forEach(i  => { eventMap[i] = rng.rand()>0.2 ? 'INTERNAL_HANDOVER_SUCCESS':'INTERNAL_HANDOVER_FAILURE'; });
+  rlfIdx.forEach(i => { eventMap[i] = 'RRC_RLF'; });
+  scgIdx.forEach(i => { if (!eventMap[i]) eventMap[i]='NR_SCG_FAILURE'; });
+  a3Idx.forEach(i  => { if (!eventMap[i]) eventMap[i]='A3_TRIGGER'; });
+
+  const cellPciMap = Object.fromEntries(DEMO_SITES.map(s=>[s.cell_id, s]));
+
+  for (let i = 0; i < N_DEMO; i++) {
+    const lat=lats[i], lon=lons[i];
+    // Best server
+    let best = null;
+    for (const site of PRIMARY_SITES) {
+      const dist = haversineM(lat,lon,site.lat,site.lon);
+      const rsrp = logDistRsrp(dist, shadow[i]*0.5);
+      if (!best || rsrp > best.rsrp) best = {rsrp, cell_id:site.cell_id};
+    }
+    const rsrp = eventMap[i]==='RRC_RLF' ? rng.randn(-118,4) : best.rsrp;
+    const n_int = Math.max(0.5, (rsrp+120)/20);
+    const rsrq = Math.max(-19.5, Math.min(-3, 10*Math.log10(100/(1+n_int)) - (120+rsrp)*0.15));
+    const sinr = Math.max(-10, Math.min(40, (rsrp+120)*0.6 - 5 + rng.randn(0,2)));
+    const cqi  = Math.max(0, Math.min(15, Math.round((sinr+10)/3.5)));
+    const site  = cellPciMap[best.cell_id] || {};
+    const bin   = classifyRsrp(rsrp);
+
+    const etype = eventMap[i] || '';
+    samples.push({
+      timestamp_ms:     baseTs + i*1500,
+      latitude:         lat,
+      longitude:        lon,
+      cell_id:          best.cell_id,
+      pci:              site.pci || 0,
+      earfcn:           site.earfcn || 0,
+      tech:             site.tech || 'LTE',
+      rsrp_dbm:         +rsrp.toFixed(1),
+      rsrq_db:          +rsrq.toFixed(1),
+      sinr_db:          +sinr.toFixed(1),
+      cqi:              cqi,
+      ta_us:            +(haversineM(lat,lon,site.lat||CENTER[0],site.lon||CENTER[1])/150000).toFixed(2),
+      throughput_dl_mbps: +Math.max(0, cqi*4.5+rng.randn(0,3)).toFixed(1),
+      throughput_ul_mbps: +Math.max(0, cqi*1.2+rng.randn(0,1.5)).toFixed(1),
+      ho_attempt:  etype==='INTERNAL_HANDOVER_ATTEMPT'?1:0,
+      ho_success:  etype==='INTERNAL_HANDOVER_SUCCESS'?1:0,
+      ho_failure:  etype==='INTERNAL_HANDOVER_FAILURE'?1:0,
+      rlf_flag:    etype==='RRC_RLF'?1:0,
+      scg_failure: etype==='NR_SCG_FAILURE'?1:0,
+      a3_trigger:  etype==='A3_TRIGGER'?1:0,
+      a5_trigger:  etype==='A5_TRIGGER'?1:0,
+      event_type:  etype,
+      event_cause: etype==='INTERNAL_HANDOVER_FAILURE'?'FAILED_IN_TARGET_RAN': etype==='RRC_RLF'?'T310_EXPIRY':'',
+      rsrp_class:  bin.label,
+      rsrp_color:  bin.color,
+      source_file: 'demo_synthetic',
+    });
+  }
+  return { samples, cellMeta: DEMO_SITES.map(s=>({...s})) };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function classifyRsrp(v) {
+  for (const b of RSRP_BINS) if (v >= b.min && v < b.max) return b;
+  return { label:'N/A', color:'#888888' };
+}
+
+function enrichSample(s) {
+  const bin = classifyRsrp(s.rsrp_dbm ?? -999);
+  s.rsrp_class = bin.label;
+  s.rsrp_color = bin.color;
+  // Tech from EARFCN if not set
+  if (!s.tech) {
+    const e = s.earfcn || 0;
+    s.tech = e >= 600000 ? 'NR' : e <= 1023 ? '2G' : 'LTE';
+  }
+  return s;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FILE PARSERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function parseGpsCsv(text) {
+  const res = Papa.parse(text.trim(), { header:true, dynamicTyping:true, skipEmptyLines:true });
+  if (!res.data.length) return [];
+  const rows = res.data;
+  const hdr  = Object.keys(rows[0]).map(k=>k.toLowerCase().trim());
+  const latK = ['latitude','lat','gps_lat','y'].find(k=>hdr.includes(k));
+  const lonK = ['longitude','lon','lng','gps_lon','x'].find(k=>hdr.includes(k));
+  const tsK  = ['timestamp_ms','timestamp','time','ts','utc_time'].find(k=>hdr.includes(k));
+  if (!latK || !lonK) return [];
+  return rows.map(r => ({
+    latitude:    parseFloat(r[latK]),
+    longitude:   parseFloat(r[lonK]),
+    timestamp_ms: tsToMs(r[tsK]),
+    imsi: r['imsi'] || '',
+  })).filter(r => isFinite(r.latitude) && isFinite(r.longitude));
+}
+
+function parseGpsKml(text) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, 'text/xml');
+  const pts = [];
+  doc.querySelectorAll('Placemark').forEach(pm => {
+    const when = pm.querySelector('when');
+    const coord = pm.querySelector('coordinates');
+    if (!coord) return;
+    const parts = coord.textContent.trim().split(',');
+    if (parts.length < 2) return;
+    pts.push({
+      longitude:   parseFloat(parts[0]),
+      latitude:    parseFloat(parts[1]),
+      timestamp_ms: when ? tsToMs(when.textContent.trim()) : 0,
+      imsi: '',
+    });
+  });
+  return pts;
+}
+
+function parseGpsGpx(text) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, 'text/xml');
+  const pts = [];
+  doc.querySelectorAll('trkpt').forEach(pt => {
+    const lat = parseFloat(pt.getAttribute('lat'));
+    const lon = parseFloat(pt.getAttribute('lon'));
+    const timeEl = pt.querySelector('time');
+    if (!isFinite(lat) || !isFinite(lon)) return;
+    pts.push({ latitude:lat, longitude:lon, timestamp_ms: timeEl ? tsToMs(timeEl.textContent.trim()) : 0, imsi:'' });
+  });
+  return pts;
+}
+
+function parseEventsCsv(text) {
+  const res = Papa.parse(text.trim(), { header:true, dynamicTyping:true, skipEmptyLines:true });
+  if (!res.data.length) return [];
+  const colMap = {
+    eventtype:'event_type', event:'event_type',
+    timestamp_ms:'timestamp_ms', timestamp:'timestamp_ms', time:'timestamp_ms',
+    cellid:'cell_id', cell_id:'cell_id', enb_id:'cell_id',
+    pci:'pci', earfcn:'earfcn', rnti:'rnti',
+    rsrp:'rsrp_dbm', rsrp_dbm:'rsrp_dbm',
+    rsrq:'rsrq_db', rsrq_db:'rsrq_db',
+    sinr:'sinr_db', sinr_db:'sinr_db',
+    cause_code:'event_cause', cause:'event_cause',
+  };
+  return res.data.map(row => {
+    const s = {};
+    for (const [k,v] of Object.entries(row)) {
+      const mapped = colMap[k.toLowerCase().trim()] || k.toLowerCase().trim();
+      s[mapped] = v;
+    }
+    s.timestamp_ms = tsToMs(s.timestamp_ms);
+    s.cell_id    = parseInt(s.cell_id)  || 0;
+    s.pci        = parseInt(s.pci)      || 0;
+    s.earfcn     = parseInt(s.earfcn)   || 0;
+    s.rsrp_dbm   = parseFloat(s.rsrp_dbm)   || NaN;
+    s.rsrq_db    = parseFloat(s.rsrq_db)    || NaN;
+    s.sinr_db    = parseFloat(s.sinr_db)    || NaN;
+    const et = normalizeEventType(String(s.event_type||''));
+    s.event_type   = et;
+    s.ho_attempt   = et==='INTERNAL_HANDOVER_ATTEMPT'?1:0;
+    s.ho_success   = et==='INTERNAL_HANDOVER_SUCCESS'?1:0;
+    s.ho_failure   = et==='INTERNAL_HANDOVER_FAILURE'?1:0;
+    s.rlf_flag     = et==='RRC_RLF'?1:0;
+    s.scg_failure  = et==='NR_SCG_FAILURE'?1:0;
+    s.a3_trigger   = et==='A3_TRIGGER'?1:0;
+    s.a5_trigger   = et==='A5_TRIGGER'?1:0;
+    s.source_file  = 'events_csv';
+    return enrichSample(s);
+  });
+}
+
+function parseL3Log(text) {
+  const samples = [];
+  const tsRe    = /(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}(?:\.\d+)?)/;
+  const msgRe   = /(RRCMeasurementReport|RRCConnectionSetupComplete|RRCReconfiguration|SCGFailureInformation|UECapabilityInformation|RRCConnectionRelease)/i;
+  const cellRe  = /\[CELL[:\s](\d+)\]/i;
+  const rsrpRe  = /rsrp(?:Result)?[:\s]+(\d+)/i;
+  const rsrqRe  = /rsrq(?:Result)?[:\s]+(\d+)/i;
+  const sinrRe  = /sinr(?:Result)?[:\s]+(\d+)/i;
+  const pciRe   = /\bpci[:\s]+(\d+)/i;
+  const earfcnRe= /\b(?:earfcn|arfcn|dl-CarrierFreq)[:\s]+(\d+)/i;
+  const cqiRe   = /\bcqi[:\s]+(\d+)/i;
+
+  // Split into blocks on timestamp+message type lines
+  const lines = text.split('\n');
+  let block = [];
+  const blocks = [];
+  for (const line of lines) {
+    if (tsRe.test(line) && msgRe.test(line) && block.length) { blocks.push(block.join('\n')); block=[line]; }
+    else block.push(line);
+  }
+  if (block.length) blocks.push(block.join('\n'));
+
+  for (const blk of blocks) {
+    const tsM = tsRe.exec(blk); if (!tsM) continue;
+    const msgM = msgRe.exec(blk); if (!msgM) continue;
+    const ts_ms = tsToMs(tsM[1]);
+    const cell_id = cellRe.exec(blk)?.[1]|0;
+    const rsrp_ie = parseInt(rsrpRe.exec(blk)?.[1]||0);
+    const rsrq_ie = parseInt(rsrqRe.exec(blk)?.[1]||0);
+    const sinr_ie = parseInt(sinrRe.exec(blk)?.[1]||0);
+    const pci     = parseInt(pciRe.exec(blk)?.[1]||0);
+    const earfcn  = parseInt(earfcnRe.exec(blk)?.[1]||0);
+    const cqi     = parseInt(cqiRe.exec(blk)?.[1]||0);
+    const s = {
+      timestamp_ms: ts_ms, cell_id, pci, earfcn,
+      rsrp_dbm:  rsrp_ie > 0 ? rsrp_ie - 140   : NaN,
+      rsrq_db:   rsrq_ie > 0 ? rsrq_ie/2 - 19.5: NaN,
+      sinr_db:   sinr_ie > 0 ? sinr_ie*0.5-23   : NaN,
+      cqi:       cqi || NaN,
+      event_type: msgM[1],
+      scg_failure: /SCGFailure/i.test(msgM[1]) ? 1 : 0,
+      ho_attempt:0, ho_success:0, ho_failure:0, rlf_flag:0,
+      a3_trigger:0, a5_trigger:0, source_file:'l3_log',
+    };
+    samples.push(enrichSample(s));
+  }
+  return samples;
+}
+
+function parseCellMetaCsv(text) {
+  const res = Papa.parse(text.trim(), { header:true, dynamicTyping:true, skipEmptyLines:true });
+  return res.data.map(r => {
+    const row = Object.fromEntries(Object.entries(r).map(([k,v])=>[k.toLowerCase().trim(),v]));
+    return {
+      cell_id:   parseInt(row.cellid || row.cell_id) || 0,
+      site:      row.site_name || row.sitename || row.site || '',
+      lat:       parseFloat(row.lat || row.latitude)  || NaN,
+      lon:       parseFloat(row.lon || row.longitude) || NaN,
+      az:        parseFloat(row.azimuth || row.az)    || 0,
+      pci:       parseInt(row.pci) || 0,
+      earfcn:    parseInt(row.earfcn) || 0,
+      band:      row.band || '',
+      tech:      row.tech || row.technology || 'LTE',
+      tilt:      parseFloat(row.tilt) || 0,
+      height:    parseFloat(row.height) || 30,
+    };
+  }).filter(r => isFinite(r.lat) && isFinite(r.lon));
+}
+
+// ── GPS correlation ───────────────────────────────────────────────────────────
+
+function correlateGps(samples, gpsPts) {
+  if (!gpsPts.length) return samples;
+  const sorted = [...gpsPts].sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
+  return samples.map(s => {
+    const ts = s.timestamp_ms;
+    // Binary search for nearest
+    let lo=0, hi=sorted.length-1, nearest=sorted[0];
+    while (lo<=hi) {
+      const mid=(lo+hi)>>1;
+      if (Math.abs(sorted[mid].timestamp_ms-ts) < Math.abs(nearest.timestamp_ms-ts)) nearest=sorted[mid];
+      if (sorted[mid].timestamp_ms < ts) lo=mid+1; else hi=mid-1;
+    }
+    if (Math.abs(nearest.timestamp_ms - ts) <= 500) {
+      return { ...s, latitude:nearest.latitude, longitude:nearest.longitude };
+    }
+    return s;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function tsToMs(val) {
+  if (val == null || val === '') return 0;
+  const n = Number(val);
+  if (!isNaN(n)) { return n > 1e12 ? n : n > 1e9 ? n*1000 : 0; }
+  const d = new Date(String(val));
+  return isNaN(d) ? 0 : d.getTime();
+}
+
+function normalizeEventType(raw) {
+  const abbrev = { HO_ATT:'INTERNAL_HANDOVER_ATTEMPT', HO_SUCC:'INTERNAL_HANDOVER_SUCCESS',
+    HO_FAIL:'INTERNAL_HANDOVER_FAILURE', RLF:'RRC_RLF', SCG_FAIL:'NR_SCG_FAILURE',
+    A3:'A3_TRIGGER', A5:'A5_TRIGGER', ERAB:'INTERNAL_ERAB_SETUP', RAB_EST:'INTERNAL_RAB_ESTABLISHMENT' };
+  const up = raw.trim().toUpperCase();
+  if (abbrev[up]) return abbrev[up];
+  for (const k of Object.keys(EVENT_COLORS)) if (up.includes(k)) return k;
+  return raw;
+}
+
+function fmt(v, digits=1) {
+  if (v == null || !isFinite(v)) return 'N/A';
+  return (+v).toFixed(digits);
+}
+
+function pct(num, den, scale=100) {
+  if (!den) return 'N/A';
+  return (num/den*scale).toFixed(1);
+}
+
+function median(arr) {
+  const s = arr.filter(isFinite).sort((a,b)=>a-b);
+  if (!s.length) return NaN;
+  const mid = s.length>>1;
+  return s.length%2 ? s[mid] : (s[mid-1]+s[mid])/2;
+}
+
+function percentile(arr, p) {
+  const s = arr.filter(isFinite).sort((a,b)=>a-b);
+  if (!s.length) return NaN;
+  return s[Math.floor(p/100*(s.length-1))];
+}
+
+function offsetLatLon(lat, lon, bearingDeg, distM) {
+  const d = distM / EARTH_R;
+  const b = bearingDeg * Math.PI/180;
+  const lat1 = lat * Math.PI/180;
+  const lon1 = lon * Math.PI/180;
+  const lat2 = Math.asin(Math.sin(lat1)*Math.cos(d) + Math.cos(lat1)*Math.sin(d)*Math.cos(b));
+  const lon2 = lon1 + Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(lat1), Math.cos(d)-Math.sin(lat1)*Math.sin(lat2));
+  return [lat2*180/Math.PI, lon2*180/Math.PI];
+}
+
+function buildWedge(lat, lon, az, hpbwHalf=30, radiusM=300, nPts=16) {
+  const pts = [[lat,lon]];
+  for (let i=0; i<=nPts; i++) {
+    const b = az - hpbwHalf + (hpbwHalf*2)*i/nPts;
+    pts.push(offsetLatLon(lat, lon, b, radiusM));
+  }
+  pts.push([lat,lon]);
+  return pts;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// KPI ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function computeKpis(samples) {
+  const n = samples.length;
+  if (!n) return {};
+  const rsrp = samples.map(s=>s.rsrp_dbm).filter(isFinite);
+  const rsrq = samples.map(s=>s.rsrq_db).filter(isFinite);
+  const sinr = samples.map(s=>s.sinr_db).filter(isFinite);
+  const dl   = samples.map(s=>s.throughput_dl_mbps).filter(isFinite);
+  const hoAtt  = samples.reduce((a,s)=>a+(s.ho_attempt||0),0);
+  const hoSucc = samples.reduce((a,s)=>a+(s.ho_success||0),0);
+  const hoFail = samples.reduce((a,s)=>a+(s.ho_failure||0),0);
+  const rlf    = samples.reduce((a,s)=>a+(s.rlf_flag||0),0);
+  const scg    = samples.reduce((a,s)=>a+(s.scg_failure||0),0);
+  const gpsN   = samples.filter(s=>isFinite(s.latitude)&&isFinite(s.longitude)).length;
+  const tsVals = samples.map(s=>s.timestamp_ms).filter(v=>v>0);
+  const tRange = tsVals.length>=2 ?
+    new Date(tsVals[0]).toISOString().slice(11,19)+' – '+new Date(tsVals[tsVals.length-1]).toISOString().slice(11,19)+' UTC' : 'N/A';
+  const durMin = tsVals.length>=2 ? ((tsVals[tsVals.length-1]-tsVals[0])/60000).toFixed(1) : 0;
+
+  const bins = {};
+  RSRP_BINS.forEach(b=>bins[b.label]=0);
+  samples.forEach(s=>{ if(s.rsrp_class) bins[s.rsrp_class]=(bins[s.rsrp_class]||0)+1; });
+
+  return {
+    n, gpsN, gpsPct: pct(gpsN,n), tRange, durMin,
+    rsrpMedian: median(rsrp), rsrpP5: percentile(rsrp,5), rsrpP95: percentile(rsrp,95),
+    rsrqMedian: median(rsrq), sinrMedian: median(sinr),
+    dlMedian: median(dl),
+    hoAtt, hoSucc, hoFail, hoSR: pct(hoSucc,hoAtt),
+    rlf, rlfRate: pct(rlf,n,10000), scg, bins,
+  };
+}
+
+function computePerCell(samples) {
+  const map = {};
+  for (const s of samples) {
+    const id = s.cell_id || 0;
+    if (!map[id]) map[id] = { cell_id:id, pci:s.pci||0, rsrpArr:[], hoAtt:0, hoSucc:0, rlf:0, n:0 };
+    const c = map[id];
+    c.n++;
+    if (isFinite(s.rsrp_dbm)) c.rsrpArr.push(s.rsrp_dbm);
+    c.hoAtt  += s.ho_attempt||0;
+    c.hoSucc += s.ho_success||0;
+    c.rlf    += s.rlf_flag||0;
+  }
+  return Object.values(map).map(c => ({
+    cell_id:     c.cell_id,
+    pci:         c.pci,
+    samples:     c.n,
+    rsrp_median: +median(c.rsrpArr).toFixed(1),
+    rsrp_p5:     +percentile(c.rsrpArr,5).toFixed(1),
+    ho_sr:       c.hoAtt ? pct(c.hoSucc,c.hoAtt)+'%' : 'N/A',
+    rlf_rate:    +pct(c.rlf,c.n,10000),
+  })).sort((a,b)=>a.rsrp_median-b.rsrp_median);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAP MANAGER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let map, currentTileLayer;
+let dotLayer=null, heatLayer=null, trackLayer=null;
+let eventMarkers=null, siteMarkers=null, sectorPolys=null;
+const TILE_CACHE = {};
+
+function initMap() {
+  map = L.map('map', { zoomControl:true, preferCanvas:true }).setView(CENTER, 13);
+  switchTile('dark');
+  map.on('click', () => { document.getElementById('detail-panel').style.display='none'; });
+}
+
+function switchTile(style) {
+  const cfg = TILE_LAYERS[style] || TILE_LAYERS.dark;
+  if (currentTileLayer) map.removeLayer(currentTileLayer);
+  currentTileLayer = L.tileLayer(cfg.url, { attribution:cfg.attr, maxZoom:19, detectRetina:true });
+  currentTileLayer.addTo(map);
+  currentTileLayer.bringToBack();
+}
+
+function clearAllLayers() {
+  [dotLayer, heatLayer, trackLayer, eventMarkers, siteMarkers, sectorPolys].forEach(l => { if(l) map.removeLayer(l); });
+  dotLayer=heatLayer=trackLayer=eventMarkers=siteMarkers=sectorPolys=null;
+}
+
+function renderAll() {
+  const viz  = document.querySelector('input[name=viz]:checked').value;
+  const over = {
+    track:   document.getElementById('chk-track').checked,
+    sites:   document.getElementById('chk-sites').checked,
+    sectors: document.getElementById('chk-sectors').checked,
+    events:  document.getElementById('chk-events').checked,
+  };
+  clearAllLayers();
+  const samples = state.filtered;
+  if (!samples.length) return;
+
+  const withGps = samples.filter(s=>isFinite(s.latitude)&&isFinite(s.longitude));
+
+  // ── GPS Track ─────────────────────────────────────────────────────────
+  if (over.track && withGps.length >= 2) {
+    const sorted = [...withGps].sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
+    let pts = sorted.map(s=>[s.latitude,s.longitude]);
+    if (pts.length > 2000) { const step=Math.ceil(pts.length/2000); pts=pts.filter((_,i)=>i%step===0); }
+    trackLayer = L.polyline(pts, { color:'#ffffaa', weight:2, opacity:0.5, smoothFactor:1 }).addTo(map);
+  }
+
+  // ── Viz mode ──────────────────────────────────────────────────────────
+  if (viz === 'dots') renderDots(withGps);
+  else if (viz === 'heatmap') renderHeatmap(withGps);
+  else if (viz === 'cluster') renderCluster(withGps);
+
+  // ── Event markers ─────────────────────────────────────────────────────
+  if (over.events) renderEventMarkers(withGps);
+
+  // ── Sector wedges ─────────────────────────────────────────────────────
+  if (over.sectors && state.cellMeta.length) renderSectors();
+
+  // ── Site markers ──────────────────────────────────────────────────────
+  if (over.sites && state.cellMeta.length) renderSiteMarkers();
+
+  // ── Fit bounds ────────────────────────────────────────────────────────
+  if (withGps.length) {
+    const lats=withGps.map(s=>s.latitude), lons=withGps.map(s=>s.longitude);
+    try { map.fitBounds([[Math.min(...lats),Math.min(...lons)],[Math.max(...lats),Math.max(...lons)]], {padding:[20,20]}); } catch(e){}
+  }
+}
+
+function renderDots(samples) {
+  dotLayer = L.layerGroup();
+  const step = samples.length > 30000 ? Math.ceil(samples.length/30000) : 1;
+  samples.forEach((s,i) => {
+    if (i%step!==0) return;
+    const color = s.rsrp_color || '#888';
+    const marker = L.circleMarker([s.latitude,s.longitude], {
+      radius:4, color:color, fillColor:color, fillOpacity:0.8, weight:0,
+    });
+    marker.bindTooltip(buildTooltip(s), {sticky:true, className:'leaflet-popup-content-wrapper'});
+    marker.on('click', e => { L.DomEvent.stopPropagation(e); showDetail(s); });
+    marker.addTo(dotLayer);
+  });
+  dotLayer.addTo(map);
+}
+
+function renderHeatmap(samples) {
+  const metric = document.getElementById('sel-metric').value;
+  const ranges = { rsrp_dbm:[-140,-40], rsrq_db:[-19.5,0], sinr_db:[-23,40], throughput_dl_mbps:[0,150] };
+  const [vmin,vmax] = ranges[metric]||[-140,-40];
+  let pts = samples.map(s => {
+    const v = s[metric];
+    if (!isFinite(v)) return null;
+    const w = Math.max(0, Math.min(1, (v-vmin)/(vmax-vmin)));
+    return [s.latitude, s.longitude, w];
+  }).filter(Boolean);
+  if (pts.length > 15000) { const step=Math.ceil(pts.length/15000); pts=pts.filter((_,i)=>i%step===0); }
+  heatLayer = L.heatLayer(pts, { radius:15, blur:20, minOpacity:0.3, max:1 }).addTo(map);
+}
+
+function renderCluster(samples) {
+  dotLayer = L.markerClusterGroup({ maxClusterRadius:60, spiderfyOnMaxZoom:true });
+  samples.forEach(s => {
+    const color = s.rsrp_color || '#888';
+    const icon = L.divIcon({
+      html:`<div style="width:8px;height:8px;border-radius:50%;background:${color};border:1px solid rgba(255,255,255,.4)"></div>`,
+      className:'', iconSize:[8,8], iconAnchor:[4,4]
+    });
+    const m = L.marker([s.latitude,s.longitude], {icon});
+    m.bindTooltip(buildTooltip(s), {sticky:true});
+    m.on('click', e=>{ L.DomEvent.stopPropagation(e); showDetail(s); });
+    m.addTo(dotLayer);
+  });
+  dotLayer.addTo(map);
+}
+
+function renderEventMarkers(samples) {
+  eventMarkers = L.markerClusterGroup({ maxClusterRadius:40, iconCreateFunction(cluster) {
+    return L.divIcon({ html:`<div style="background:#e94560;color:#fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold">${cluster.getChildCount()}</div>`, className:'', iconSize:[24,24] });
+  }});
+  const evts = samples.filter(s=>s.event_type && EVENT_COLORS[s.event_type]);
+  evts.forEach(s => {
+    const color = EVENT_COLORS[s.event_type];
+    const sym = { INTERNAL_HANDOVER_FAILURE:'✕', RRC_RLF:'☠', NR_SCG_FAILURE:'⚠', INTERNAL_HANDOVER_SUCCESS:'✓', A3_TRIGGER:'▶', A5_TRIGGER:'◀', INTERNAL_HANDOVER_ATTEMPT:'◈' };
+    const icon = L.divIcon({
+      html:`<div style="background:${color};color:#fff;border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:10px;border:1.5px solid rgba(255,255,255,.5)">${sym[s.event_type]||'!'}</div>`,
+      className:'', iconSize:[18,18], iconAnchor:[9,9]
+    });
+    const m = L.marker([s.latitude,s.longitude],{icon});
+    m.bindTooltip(`<b>${s.event_type.replace('INTERNAL_','')}</b><br>${s.event_cause||''}`,{sticky:true});
+    m.on('click', e=>{ L.DomEvent.stopPropagation(e); showDetail(s); });
+    m.addTo(eventMarkers);
+  });
+  eventMarkers.addTo(map);
+}
+
+function renderSectors() {
+  sectorPolys = L.layerGroup();
+  const samples = state.filtered;
+  for (const site of state.cellMeta) {
+    if (!isFinite(site.lat)||!isFinite(site.lon)) continue;
+    // Compute median RSRP in wedge
+    let siteRsrp = NaN;
+    const inWedge = samples.filter(s => {
+      if (!isFinite(s.latitude)||!isFinite(s.longitude)) return false;
+      const dist = haversineM(s.latitude,s.longitude,site.lat,site.lon);
+      if (dist > 400) return false;
+      const dy=(s.latitude-site.lat)*111320, dx=(s.longitude-site.lon)*111320*Math.cos(site.lat*Math.PI/180);
+      let bearing = Math.atan2(dx,dy)*180/Math.PI;
+      if(bearing<0) bearing+=360;
+      const diff = Math.abs(((bearing-site.az)+180)%360-180);
+      return diff <= 35;
+    });
+    if (inWedge.length) siteRsrp = median(inWedge.map(s=>s.rsrp_dbm).filter(isFinite));
+    const bin = classifyRsrp(siteRsrp);
+    const color = isFinite(siteRsrp) ? bin.color : '#888';
+    const wedge = buildWedge(site.lat, site.lon, site.az, 30, 300);
+    L.polygon(wedge, {
+      color, weight:1.5, fillColor:color, fillOpacity:0.2,
+    }).bindTooltip(
+      `<b>${site.site||site.cell_id}</b><br>Cell:${site.cell_id} PCI:${site.pci}<br>Az:${site.az}° Band:${site.band}<br>RSRP: ${fmt(siteRsrp)} dBm`,
+      {sticky:true}
+    ).addTo(sectorPolys);
+  }
+  sectorPolys.addTo(map);
+}
+
+function renderSiteMarkers() {
+  siteMarkers = L.layerGroup();
+  const unique = {};
+  for (const s of state.cellMeta) {
+    const key = `${s.lat},${s.lon}`;
+    if (!unique[key]) { unique[key]=s;
+      const icon = L.divIcon({
+        html:`<div style="color:#e94560;font-size:18px;line-height:1;text-shadow:0 0 4px rgba(0,0,0,.8)">▲</div>`,
+        className:'', iconSize:[18,18], iconAnchor:[9,16]
+      });
+      L.marker([s.lat,s.lon],{icon}).bindTooltip(`<b>${s.site||s.cell_id}</b><br>${s.tech} ${s.band}`).addTo(siteMarkers);
+    }
+  }
+  siteMarkers.addTo(map);
+}
+
+function buildTooltip(s) {
+  return `<b>${new Date(s.timestamp_ms).toISOString().slice(11,19)} UTC</b><br>` +
+    `RSRP: <b>${fmt(s.rsrp_dbm)} dBm</b> | RSRQ: ${fmt(s.rsrq_db)} dB<br>` +
+    `SINR: ${fmt(s.sinr_db)} dB | CQI: ${s.cqi??'—'}<br>` +
+    `Cell: ${s.cell_id} | PCI: ${s.pci}<br>` +
+    (s.event_type ? `Event: <b>${s.event_type.replace('INTERNAL_','')}</b>` : '');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TIMELINE (Plotly)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function renderTimeline(samples) {
+  const el = document.getElementById('timeline-chart');
+  if (!samples.length) { Plotly.purge(el); return; }
+
+  const sorted = [...samples].filter(s=>s.timestamp_ms>0).sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
+  let disp = sorted;
+  if (disp.length > 5000) { const step=Math.ceil(disp.length/5000); disp=disp.filter((_,i)=>i%step===0); }
+
+  const xs = disp.map(s=>new Date(s.timestamp_ms).toISOString());
+
+  const traces = [{
+    x: xs, y: disp.map(s=>s.rsrp_dbm),
+    mode:'lines', name:'RSRP (dBm)',
+    line:{ color:'#00d4ff', width:1.5 },
+    hovertemplate:'<b>%{x}</b><br>RSRP: %{y:.1f} dBm<extra></extra>',
+    yaxis:'y1',
+  },{
+    x: xs, y: disp.map(s=>s.sinr_db),
+    mode:'lines', name:'SINR (dB)',
+    line:{ color:'#ff6b6b', width:1.5, dash:'dash' },
+    hovertemplate:'<b>%{x}</b><br>SINR: %{y:.1f} dB<extra></extra>',
+    yaxis:'y2', opacity:0.85,
+  }];
+
+  // Event markers
+  for (const [etype, color] of Object.entries(EVENT_COLORS)) {
+    const evts = disp.filter(s=>s.event_type===etype);
+    if (!evts.length) continue;
+    traces.push({
+      x: evts.map(s=>new Date(s.timestamp_ms).toISOString()),
+      y: evts.map(s=>s.rsrp_dbm??-80),
+      mode:'markers', name:etype.replace('INTERNAL_',''),
+      marker:{ symbol:'circle', size:8, color, line:{width:1.5,color:'#fff'} },
+      hovertemplate:`<b>${etype.replace('INTERNAL_','')}</b><br>%{x}<extra></extra>`,
+      yaxis:'y1',
+    });
+  }
+
+  const layout = {
+    paper_bgcolor:'#1a1a2e', plot_bgcolor:'#16213e',
+    font:{ color:'#e0e0e0', family:'monospace', size:10 },
+    margin:{ l:50, r:60, t:6, b:40 },
+    hovermode:'x unified',
+    xaxis:{ gridcolor:'#2a2a4a', tickfont:{size:9}, rangeslider:{visible:true,thickness:0.06}, type:'date' },
+    yaxis:{ title:'RSRP (dBm)', gridcolor:'#2a2a4a', range:[-145,-30], tickfont:{size:9} },
+    yaxis2:{ title:'SINR (dB)', overlaying:'y', side:'right', gridcolor:'#2a2a4a', range:[-30,45], tickfont:{size:9}, showgrid:false },
+    legend:{ orientation:'h', x:0, y:1.15, font:{size:9}, bgcolor:'rgba(0,0,0,0)' },
+    shapes: [
+      {type:'line',y0:-80, y1:-80,x0:0,x1:1,xref:'paper',yref:'y',line:{color:'#2ecc71',width:0.8,dash:'dot'}},
+      {type:'line',y0:-90, y1:-90,x0:0,x1:1,xref:'paper',yref:'y',line:{color:'#a8d08d',width:0.8,dash:'dot'}},
+      {type:'line',y0:-100,y1:-100,x0:0,x1:1,xref:'paper',yref:'y',line:{color:'#f0a500',width:0.8,dash:'dot'}},
+      {type:'line',y0:-110,y1:-110,x0:0,x1:1,xref:'paper',yref:'y',line:{color:'#e06000',width:0.8,dash:'dot'}},
+    ],
+  };
+
+  Plotly.newPlot(el, traces, layout, { responsive:true, displayModeBar:false });
+
+  // Brush → map filter
+  el.on('plotly_relayout', data => {
+    const x0 = data['xaxis.range[0]'], x1 = data['xaxis.range[1]'];
+    if (x0 && x1) {
+      const t0=new Date(x0).getTime(), t1=new Date(x1).getTime();
+      state.filtered = applyFilters(state.samples, { timeRange:[t0,t1] });
+      renderAll();
+    } else if (data['xaxis.autorange']) {
+      state.filtered = applyFilters(state.samples);
+      renderAll();
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// KPI PANEL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function rsrpColor(v) {
+  if (!isFinite(v)) return '#888';
+  if (v>=-80) return '#2ecc71'; if (v>=-90) return '#a8d08d';
+  if (v>=-100) return '#f0a500'; if (v>=-110) return '#e06000';
+  return '#c0392b';
+}
+
+function updateKpiPanel(kpis) {
+  if (!kpis || !kpis.n) { document.getElementById('kpi-panel').innerHTML='<div style="color:#888;font-size:11px">No data loaded.</div>'; return; }
+  const k = kpis;
+  document.getElementById('kpi-panel').innerHTML = `
+    <div class="kpi-label">Samples</div><div class="kpi-val">${k.n.toLocaleString()}</div>
+    <div class="kpi-label">GPS Match</div><div class="kpi-val">${k.gpsPct}%</div>
+    <div class="kpi-label">Duration</div><div class="kpi-val">${k.durMin} min</div>
+    <div class="kpi-label">RSRP P50 / P5 / P95</div>
+    <div class="kpi-val" style="color:${rsrpColor(k.rsrpMedian)}">${fmt(k.rsrpMedian)} / ${fmt(k.rsrpP5)} / ${fmt(k.rsrpP95)} dBm</div>
+    <div class="kpi-label">RSRQ Median</div><div class="kpi-val">${fmt(k.rsrqMedian)} dB</div>
+    <div class="kpi-label">SINR Median</div><div class="kpi-val">${fmt(k.sinrMedian)} dB</div>
+    <div class="kpi-label">HO Success Rate</div>
+    <div class="kpi-val" style="color:${parseFloat(k.hoSR)>=90?'#2ecc71':'#f0a500'}">${k.hoSR}% (${k.hoSucc}/${k.hoAtt})</div>
+    <div class="kpi-label">RLF Count</div>
+    <div class="kpi-val" style="color:${k.rlf>0?'#e74c3c':'#e0e0e0'}">${k.rlf} (${k.rlfRate}/10k)</div>
+    <div class="kpi-label">SCG Failures</div>
+    <div class="kpi-val" style="color:${k.scg>0?'#f39c12':'#e0e0e0'}">${k.scg}</div>
+    <div class="kpi-label">DL Throughput</div><div class="kpi-val">${fmt(k.dlMedian,2)} Mbps</div>
+    ${buildCovBar(k.bins, k.n)}
+  `;
+}
+
+function buildCovBar(bins, total) {
+  if (!total) return '';
+  const order = ['Excellent','Good','Fair','Poor','Bad'];
+  const colors = { Excellent:'#2ecc71', Good:'#a8d08d', Fair:'#f0a500', Poor:'#e06000', Bad:'#c0392b' };
+  const segs = order.map(l => {
+    const p = ((bins[l]||0)/total*100).toFixed(0);
+    return `<div style="flex:${p};min-width:${p>0?'2px':0};background:${colors[l]};height:100%" title="${l}: ${bins[l]||0} (${p}%)"></div>`;
+  }).join('');
+  const legend = order.map(l=>`<span style="color:${colors[l]};font-size:9px">${(bins[l]||0).toLocaleString()}</span>`).join(' ');
+  return `<div class="kpi-label" style="margin-top:6px">Coverage Bins</div>
+    <div style="display:flex;height:12px;border-radius:3px;overflow:hidden;margin-bottom:2px">${segs}</div>
+    <div style="display:flex;justify-content:space-around;margin-bottom:6px">${legend}</div>`;
+}
+
+function updatePerCellTable(perCell) {
+  const wrap = document.getElementById('per-cell-wrap');
+  if (!perCell.length) { wrap.innerHTML=''; return; }
+  const rows = perCell.map(c=>`<tr>
+    <td>${c.cell_id}</td><td>${c.pci}</td><td>${c.samples}</td>
+    <td style="color:${rsrpColor(c.rsrp_median)}">${fmt(c.rsrp_median)}</td>
+    <td>${fmt(c.rsrp_p5)}</td><td>${c.ho_sr}</td><td>${fmt(c.rlf_rate)}</td>
+  </tr>`).join('');
+  wrap.innerHTML=`<table class="per-cell">
+    <thead><tr><th>Cell</th><th>PCI</th><th>N</th><th>RSRP P50</th><th>P5</th><th>HO SR</th><th>RLF/10k</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DETAIL PANEL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function showDetail(s) {
+  const panel = document.getElementById('detail-panel');
+  panel.style.display = 'block';
+  const color = rsrpColor(s.rsrp_dbm);
+  document.getElementById('detail-content').innerHTML = `
+    <div class="kpi-label">Time</div><div class="kpi-val">${s.timestamp_ms ? new Date(s.timestamp_ms).toISOString().replace('T',' ').slice(0,23)+' UTC' : 'N/A'}</div>
+    <div class="kpi-label">Location</div><div class="kpi-val">${isFinite(s.latitude)?s.latitude.toFixed(5):'N/A'}, ${isFinite(s.longitude)?s.longitude.toFixed(5):'N/A'}</div>
+    <div class="kpi-label">RSRP</div><div class="kpi-val" style="color:${color}">${fmt(s.rsrp_dbm)} dBm (${s.rsrp_class||'N/A'})</div>
+    <div class="kpi-label">RSRQ</div><div class="kpi-val">${fmt(s.rsrq_db)} dB</div>
+    <div class="kpi-label">SINR</div><div class="kpi-val">${fmt(s.sinr_db)} dB</div>
+    <div class="kpi-label">CQI</div><div class="kpi-val">${s.cqi??'N/A'}</div>
+    <div class="kpi-label">Cell ID</div><div class="kpi-val">${s.cell_id||'N/A'}</div>
+    <div class="kpi-label">PCI</div><div class="kpi-val">${s.pci||'N/A'}</div>
+    <div class="kpi-label">EARFCN</div><div class="kpi-val">${s.earfcn||'N/A'}</div>
+    <div class="kpi-label">Technology</div><div class="kpi-val">${s.tech||'N/A'}</div>
+    <div class="kpi-label">TA (µs)</div><div class="kpi-val">${fmt(s.ta_us,2)}</div>
+    <div class="kpi-label">DL Tput</div><div class="kpi-val">${fmt(s.throughput_dl_mbps,2)} Mbps</div>
+    <div class="kpi-label">Event</div><div class="kpi-val" style="color:${s.event_type&&EVENT_COLORS[s.event_type]||'#e0e0e0'}">${s.event_type||'—'}</div>
+    <div class="kpi-label">Cause</div><div class="kpi-val">${s.event_cause||'—'}</div>
+    <div class="kpi-label">Source</div><div class="kpi-val" style="font-size:10px">${s.source_file||'N/A'}</div>
+  `;
+  updatePerCellTable(computePerCell(state.filtered));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FILTERING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function applyFilters(samples, extra={}) {
+  const rsrpThresh = parseFloat(document.getElementById('rsrp-thresh').value);
+  const cellSel    = [...document.getElementById('sel-cell-filter').selectedOptions].map(o=>String(o.value));
+  const techSel    = [...document.getElementById('sel-tech').selectedOptions].map(o=>o.value);
+  const timeRange  = extra.timeRange || null;
+
+  return samples.filter(s => {
+    if (isFinite(s.rsrp_dbm) && s.rsrp_dbm < rsrpThresh) return false;
+    if (cellSel.length && !cellSel.includes(String(s.cell_id))) return false;
+    if (techSel.length) {
+      const e = s.earfcn||0;
+      const t = s.tech || (e>=600000?'NR':e<=1023?'2G':'LTE');
+      if (!techSel.includes(t)) return false;
+    }
+    if (timeRange) {
+      if (s.timestamp_ms < timeRange[0] || s.timestamp_ms > timeRange[1]) return false;
+    }
+    return true;
+  });
+}
+
+function refreshFilters() {
+  state.filtered = applyFilters(state.samples);
+  renderAll();
+  renderTimeline(state.filtered);
+  updateKpiPanel(computeKpis(state.filtered));
+  updatePerCellTable(computePerCell(state.filtered));
+}
+
+function populateCellFilter(samples) {
+  const sel = document.getElementById('sel-cell-filter');
+  const ids = [...new Set(samples.map(s=>s.cell_id).filter(Boolean))].sort((a,b)=>a-b);
+  sel.innerHTML = ids.map(id=>`<option value="${id}">${id}</option>`).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOAD DATA PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function loadData(newSamples, cellMeta=null) {
+  if (cellMeta) state.cellMeta = cellMeta;
+  // Merge with existing
+  if (newSamples.length) {
+    state.samples = [...state.samples, ...newSamples];
+  }
+  state.filtered = applyFilters(state.samples);
+  populateCellFilter(state.samples);
+  updateKpiPanel(computeKpis(state.filtered));
+  renderAll();
+  renderTimeline(state.filtered);
+  setStatus(`Loaded ${state.samples.length.toLocaleString()} samples`);
+}
+
+function clearAll() {
+  state.samples=[];
+  state.cellMeta=[];
+  state.filtered=[];
+  clearAllLayers();
+  document.getElementById('kpi-panel').innerHTML='<div style="color:#888;font-size:11px">No data loaded.</div>';
+  document.getElementById('per-cell-wrap').innerHTML='';
+  document.getElementById('detail-panel').style.display='none';
+  document.getElementById('sel-cell-filter').innerHTML='';
+  Plotly.purge(document.getElementById('timeline-chart'));
+  setStatus('All data cleared.');
+}
+
+function setStatus(msg) {
+  document.getElementById('status-bar').textContent = msg;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function downloadBlob(content, filename, type='text/plain') {
+  const blob = new Blob([content], {type});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportCsv() {
+  const samples = state.filtered;
+  if (!samples.length) return;
+  const keys = Object.keys(samples[0]).filter(k=>k!=='rsrp_color');
+  const header = keys.join(',');
+  const rows = samples.map(s => keys.map(k => {
+    const v = s[k];
+    if (v == null) return '';
+    const vs = String(v);
+    return vs.includes(',') ? `"${vs}"` : vs;
+  }).join(','));
+  downloadBlob([header,...rows].join('\n'), 'vdt_export.csv', 'text/csv');
+}
+
+function exportGeoJson() {
+  const samples = state.filtered.filter(s=>isFinite(s.latitude)&&isFinite(s.longitude));
+  if (!samples.length) return;
+  const features = samples.map(s => ({
+    type:'Feature',
+    geometry:{ type:'Point', coordinates:[+s.longitude.toFixed(6), +s.latitude.toFixed(6)] },
+    properties: Object.fromEntries(
+      Object.entries(s).filter(([k,v])=>k!=='rsrp_color'&&k!=='latitude'&&k!=='longitude')
+        .map(([k,v])=>[k, (typeof v==='number'&&!isFinite(v)) ? null : v])
+    ),
+  }));
+  downloadBlob(JSON.stringify({type:'FeatureCollection',features}, null, 2), 'vdt_export.geojson', 'application/json');
+}
+
+function exportKml() {
+  const samples = state.filtered.filter(s=>isFinite(s.latitude)&&isFinite(s.longitude));
+  if (!samples.length) return;
+
+  const colorMap = { Excellent:'ff71ec2e', Good:'ff8dd0a8', Fair:'ff00a5f0', Poor:'ff0060e0', Bad:'ff2b39c0', 'N/A':'ff888888' };
+
+  let styles = Object.entries(colorMap).map(([k,c]) =>
+    `<Style id="rsrp_${k.toLowerCase()}"><IconStyle><color>${c}</color><scale>0.5</scale><Icon><href>http://maps.google.com/mapfiles/kml/shapes/circle.png</href></Icon></IconStyle><LabelStyle><scale>0</scale></LabelStyle></Style>`
+  ).join('\n');
+
+  // Track polyline
+  const sorted = [...samples].sort((a,b)=>a.timestamp_ms-b.timestamp_ms);
+  let trackCoords = sorted.map(s=>`${s.longitude.toFixed(6)},${s.latitude.toFixed(6)},0`);
+  if (trackCoords.length>2000) { const step=Math.ceil(trackCoords.length/2000); trackCoords=trackCoords.filter((_,i)=>i%step===0); }
+  const trackKml = `<Placemark><name>GPS Track</name><Style><LineStyle><color>ffffaa00</color><width>2</width></LineStyle></Style><LineString><coordinates>${trackCoords.join(' ')}</coordinates></LineString></Placemark>`;
+
+  // Sample placemarks (max 5000)
+  let dispSamples = samples;
+  if (dispSamples.length>5000) { const step=Math.ceil(dispSamples.length/5000); dispSamples=dispSamples.filter((_,i)=>i%step===0); }
+  const placemarks = dispSamples.map(s=>`<Placemark>
+    <styleUrl>#rsrp_${(s.rsrp_class||'N/A').toLowerCase()}</styleUrl>
+    <description><![CDATA[RSRP: ${fmt(s.rsrp_dbm)} dBm | RSRQ: ${fmt(s.rsrq_db)} dB | SINR: ${fmt(s.sinr_db)} dB | Cell: ${s.cell_id} | ${s.event_type||''}]]></description>
+    <Point><coordinates>${s.longitude.toFixed(6)},${s.latitude.toFixed(6)},0</coordinates></Point>
+  </Placemark>`).join('\n');
+
+  const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document><name>VDT Export</name>
+${styles}
+<Folder><name>GPS Track</name>${trackKml}</Folder>
+<Folder><name>RSRP Samples</name>${placemarks}</Folder>
+</Document></kml>`;
+  downloadBlob(kml, 'vdt_export.kml', 'application/vnd.google-earth.kml+xml');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FILE UPLOAD HANDLER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function handleFile(inputId, type) {
+  const input = document.getElementById(inputId);
+  const file = input.files[0];
+  if (!file) return;
+  setStatus(`Parsing ${file.name}…`);
+  const text = await file.text();
+
+  let newSamples = [], newMeta = null;
+  try {
+    if (type === 'gps') {
+      const fname = file.name.toLowerCase();
+      let gpsPts = [];
+      if (fname.endsWith('.kml'))      gpsPts = parseGpsKml(text);
+      else if (fname.endsWith('.gpx')) gpsPts = parseGpsGpx(text);
+      else                             gpsPts = parseGpsCsv(text);
+      // Attach GPS to existing samples
+      state.samples = correlateGps(state.samples, gpsPts);
+      state.samples.forEach(enrichSample);
+      state.filtered = applyFilters(state.samples);
+      renderAll();
+      renderTimeline(state.filtered);
+      setStatus(`GPS: ${gpsPts.length} points correlated.`);
+      return;
+    } else if (type === 'events') {
+      const fname = file.name.toLowerCase();
+      newSamples = fname.endsWith('.csv') ? parseEventsCsv(text) : parseEventsCsv(text);
+    } else if (type === 'l3') {
+      newSamples = parseL3Log(text);
+    } else if (type === 'meta') {
+      newMeta = parseCellMetaCsv(text);
+      state.cellMeta = newMeta;
+      renderAll();
+      setStatus(`Metadata: ${newMeta.length} cells loaded.`);
+      return;
+    }
+    newSamples.forEach(enrichSample);
+    loadData(newSamples, newMeta);
+  } catch(e) {
+    setStatus(`Error parsing ${file.name}: ${e.message}`);
+    console.error(e);
+  }
+  input.value = '';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EVENT LISTENERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+document.getElementById('btn-demo').addEventListener('click', () => {
+  clearAll();
+  const { samples, cellMeta } = generateDemoData();
+  state.cellMeta = cellMeta;
+  loadData(samples);
+  setStatus(`Demo loaded: ${samples.length.toLocaleString()} samples over Muscat, Oman.`);
+});
+
+document.getElementById('btn-clear').addEventListener('click', clearAll);
+
+document.getElementById('file-l3').addEventListener('change', () => handleFile('file-l3','l3'));
+document.getElementById('file-events').addEventListener('change', () => handleFile('file-events','events'));
+document.getElementById('file-gps').addEventListener('change', () => handleFile('file-gps','gps'));
+document.getElementById('file-meta').addEventListener('change', () => handleFile('file-meta','meta'));
+
+document.querySelectorAll('input[name=viz]').forEach(r => r.addEventListener('change', renderAll));
+document.getElementById('sel-metric').addEventListener('change', renderAll);
+document.getElementById('chk-track').addEventListener('change', renderAll);
+document.getElementById('chk-sites').addEventListener('change', renderAll);
+document.getElementById('chk-sectors').addEventListener('change', renderAll);
+document.getElementById('chk-events').addEventListener('change', renderAll);
+
+document.getElementById('sel-tilestyle').addEventListener('change', e => switchTile(e.target.value));
+
+document.getElementById('rsrp-thresh').addEventListener('input', e => {
+  document.getElementById('rsrp-thresh-val').textContent = '−' + Math.abs(e.target.value);
+  refreshFilters();
+});
+document.getElementById('sel-cell-filter').addEventListener('change', refreshFilters);
+document.getElementById('sel-tech').addEventListener('change', refreshFilters);
+
+document.getElementById('btn-csv').addEventListener('click', exportCsv);
+document.getElementById('btn-geojson').addEventListener('click', exportGeoJson);
+document.getElementById('btn-kml').addEventListener('click', exportKml);
+document.getElementById('btn-print').addEventListener('click', () => window.print());
+
+document.getElementById('btn-close-detail').addEventListener('click', () => {
+  document.getElementById('detail-panel').style.display = 'none';
+});
+
+// Timeline collapse
+let timelineCollapsed = false;
+document.getElementById('timeline-header').addEventListener('click', () => {
+  timelineCollapsed = !timelineCollapsed;
+  const body = document.getElementById('timeline-body');
+  const panel = document.getElementById('timeline-panel');
+  const btn   = document.getElementById('btn-collapse');
+  if (timelineCollapsed) {
+    body.style.display='none'; panel.style.height='32px'; panel.style.minHeight='32px'; btn.textContent='▶';
+  } else {
+    body.style.display=''; panel.style.height='240px'; panel.style.minHeight='240px'; btn.textContent='▼';
+    setTimeout(()=>{ if(state.filtered.length) renderTimeline(state.filtered); },50);
+  }
+  map.invalidateSize();
+});
+
+// Print styles
+const printStyle = document.createElement('style');
+printStyle.innerHTML = `@media print { #sidebar,#detail-panel,#timeline-panel{display:none!important} #map-container{height:100vh!important} }`;
+document.head.appendChild(printStyle);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+initMap();
+setStatus('Ready — click "Load Demo Data" or upload files.');
+</script>
+</body>
+</html>
