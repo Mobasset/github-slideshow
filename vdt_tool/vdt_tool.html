@@ -850,13 +850,22 @@ select option{background:#16213e}
 .legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 
 /* ── Timeline panel ── */
-#timeline-panel{height:240px;min-height:240px;background:#16213e;border-top:1px solid #2a2a4a;flex-shrink:0;display:flex;flex-direction:column}
+#timeline-panel{height:240px;min-height:240px;background:#16213e;border-top:1px solid #2a2a4a;flex-shrink:0;display:flex;flex-direction:column;transition:height .15s}
+#timeline-panel.maximized{height:480px;min-height:480px}
 #timeline-header{display:flex;align-items:center;justify-content:space-between;padding:4px 10px;background:#0f3460;cursor:pointer;user-select:none}
 #timeline-header span{font-size:11px;font-weight:bold;color:#e94560}
 #timeline-header small{color:#888;font-size:10px}
+.tl-btn{background:none;border:none;color:#888;cursor:pointer;font-size:12px;padding:0 5px;line-height:1}
+.tl-btn:hover{color:#e0e0e0}
 #btn-collapse{background:none;border:none;color:#888;cursor:pointer;font-size:13px;padding:0 4px}
 #timeline-body{flex:1;min-height:0}
 #timeline-chart{width:100%;height:100%}
+
+/* ── Measure tool ── */
+#btn-measure{position:absolute;top:44px;right:10px;z-index:500;background:#16213e;color:#e0e0e0;border:1px solid #2a2a4a;padding:5px 9px;font-size:11px;cursor:pointer;border-radius:3px;font-family:monospace}
+#btn-measure:hover{background:#0f3460}
+#btn-measure.active{background:#e94560;color:#fff;border-color:#e94560}
+.measure-tooltip{background:#16213e!important;border:1px solid #e94560!important;color:#fff!important;font-size:10px!important;font-family:monospace!important;padding:2px 5px!important;white-space:nowrap}
 
 /* ── Detail panel ── */
 #detail-panel{width:290px;min-width:290px;height:100vh;overflow-y:auto;padding:10px 9px;background:#1a1a2e;border-left:1px solid #2a2a4a;display:none;flex-shrink:0}
@@ -996,6 +1005,7 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
   <div id="main">
     <div id="map-container">
       <div id="map"></div>
+      <button id="btn-measure" title="Measure distance (click to start, Esc to clear)">📏 Measure</button>
       <div id="map-legend">
         <div style="color:#fff;font-weight:bold;font-size:11px;margin-bottom:2px">Raster Serving RSRP</div>
         <div style="color:#ccc;font-size:10px;margin-bottom:6px">Unit: dBm</div>
@@ -1011,7 +1021,11 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
     <div id="timeline-panel">
       <div id="timeline-header">
         <div><span>Timeline</span> <small>— RSRP / SINR / Events</small></div>
-        <button id="btn-collapse">▼</button>
+        <div style="display:flex;align-items:center;gap:2px">
+          <button class="tl-btn" id="btn-tl-snapshot" title="Download PNG snapshot">💾</button>
+          <button class="tl-btn" id="btn-tl-maximize" title="Maximize timeline">⤢</button>
+          <button id="btn-collapse" title="Collapse timeline">▼</button>
+        </div>
       </div>
       <div id="timeline-body">
         <div id="timeline-chart"></div>
@@ -1676,8 +1690,8 @@ function parseEricssonCTraceBinary(bytes, filename) {
           const word = dv.getUint16(pOff + 42, false);
           const rsrpIe = (word >> 8) & 0x7F;
           const rsrqIe = (word >> 2) & 0x3F;
-          base.rsrp_dbm = rsrpIe - 140;
-          base.rsrq_db  = rsrqIe / 2 - 19.5;
+          if (rsrpIe > 0) base.rsrp_dbm = rsrpIe - 140;  // 0 = no measurement
+          if (rsrqIe > 0) base.rsrq_db  = rsrqIe / 2 - 19.5;
           if (pLen >= 53) base.rnti = dv.getUint16(pOff + 51, false);
           records.push({ ...base, event_type: 'RRC_MEASUREMENT_REPORT' });
 
@@ -1686,6 +1700,10 @@ function parseEricssonCTraceBinary(bytes, filename) {
           const rsrqRaw = bytes[pOff + 49];
           if (rsrpRaw !== 0x80) base.rsrp_dbm = rsrpRaw - 140;
           if (rsrqRaw !== 0x80) base.rsrq_db  = rsrqRaw / 2 - 19.5;
+          if (pLen >= 51) {
+            const sinrRaw = bytes[pOff + 50];
+            if (sinrRaw !== 0x80) base.sinr_db = sinrRaw / 2 - 23;  // range -13.5..+12 dB
+          }
           records.push({ ...base, event_type: 'INTERNAL_EVENT_UE_MOBILITY_EVAL' });
 
         } else if (evId === 0x34) {                // NR SCG failure
@@ -2052,7 +2070,14 @@ function initMap() {
   map = L.map('map', { zoomControl:true, preferCanvas:true }).setView(CENTER, 13);
   switchTile('dark');
   L.control.scale({ imperial: false, maxWidth: 200, position: 'bottomleft' }).addTo(map);
-  map.on('click', () => { document.getElementById('detail-panel').style.display='none'; });
+  map.on('click', e => {
+    if (measureMode) {
+      measurePts.push(e.latlng);
+      redrawMeasure();
+      return;  // don't close detail panel while measuring
+    }
+    document.getElementById('detail-panel').style.display='none';
+  });
 }
 
 function switchTile(style) {
@@ -2815,13 +2840,19 @@ document.getElementById('btn-close-detail').addEventListener('click', () => {
   document.getElementById('detail-panel').style.display = 'none';
 });
 
-// Timeline collapse
+// ── Timeline controls ───────────────────────────────────────────────────────
 let timelineCollapsed = false;
-document.getElementById('timeline-header').addEventListener('click', () => {
+let timelineMaximized = false;
+
+document.getElementById('timeline-header').addEventListener('click', e => {
+  // Ignore clicks from the action buttons inside the header
+  if (e.target.closest('.tl-btn') || e.target.id === 'btn-tl-snapshot' || e.target.id === 'btn-tl-maximize') return;
   timelineCollapsed = !timelineCollapsed;
-  const body = document.getElementById('timeline-body');
+  timelineMaximized = false;
+  const body  = document.getElementById('timeline-body');
   const panel = document.getElementById('timeline-panel');
   const btn   = document.getElementById('btn-collapse');
+  panel.classList.remove('maximized');
   if (timelineCollapsed) {
     body.style.display='none'; panel.style.height='32px'; panel.style.minHeight='32px'; btn.textContent='▶';
   } else {
@@ -2829,6 +2860,98 @@ document.getElementById('timeline-header').addEventListener('click', () => {
     setTimeout(()=>{ if(state.filtered.length) renderTimeline(state.filtered); },50);
   }
   map.invalidateSize();
+});
+
+document.getElementById('btn-tl-maximize').addEventListener('click', e => {
+  e.stopPropagation();
+  timelineMaximized = !timelineMaximized;
+  timelineCollapsed = false;
+  const body  = document.getElementById('timeline-body');
+  const panel = document.getElementById('timeline-panel');
+  const btn   = document.getElementById('btn-collapse');
+  body.style.display = '';
+  btn.textContent = '▼';
+  if (timelineMaximized) {
+    panel.classList.add('maximized');
+    panel.style.height = '480px'; panel.style.minHeight = '480px';
+    document.getElementById('btn-tl-maximize').textContent = '⤡';
+    document.getElementById('btn-tl-maximize').title = 'Restore timeline';
+  } else {
+    panel.classList.remove('maximized');
+    panel.style.height = '240px'; panel.style.minHeight = '240px';
+    document.getElementById('btn-tl-maximize').textContent = '⤢';
+    document.getElementById('btn-tl-maximize').title = 'Maximize timeline';
+  }
+  setTimeout(()=>{ if(state.filtered.length) renderTimeline(state.filtered); }, 50);
+  map.invalidateSize();
+});
+
+document.getElementById('btn-tl-snapshot').addEventListener('click', e => {
+  e.stopPropagation();
+  const el = document.getElementById('timeline-chart');
+  if (!el.data || !el.data.length) { setStatus('No timeline data to snapshot.'); return; }
+  Plotly.downloadImage(el, { format:'png', width:1600, height:400, filename:'vdt-timeline' });
+});
+
+// ── Distance Measure Tool ────────────────────────────────────────────────────
+let measureMode   = false;
+let measureLayer  = null;
+let measurePts    = [];
+
+function haversineDist(lat1, lon1, lat2, lon2) {
+  const R = 6371000, r = Math.PI/180;
+  const dLat = (lat2-lat1)*r, dLon = (lon2-lon1)*r;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*r)*Math.cos(lat2*r)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function fmtDist(m) { return m < 1000 ? m.toFixed(0)+'m' : (m/1000).toFixed(3)+'km'; }
+
+function clearMeasure() {
+  if (measureLayer) { map.removeLayer(measureLayer); measureLayer = null; }
+  measurePts = [];
+}
+
+function redrawMeasure() {
+  if (measureLayer) map.removeLayer(measureLayer);
+  measureLayer = L.layerGroup();
+  if (measurePts.length > 1) {
+    L.polyline(measurePts, { color:'#e94560', weight:2.5, dashArray:'6,4', opacity:0.9 }).addTo(measureLayer);
+  }
+  let cumDist = 0;
+  for (let i = 0; i < measurePts.length; i++) {
+    const p = measurePts[i];
+    if (i > 0) cumDist += haversineDist(measurePts[i-1].lat, measurePts[i-1].lng, p.lat, p.lng);
+    const label = i === 0 ? 'Start' : fmtDist(cumDist);
+    const segDist = i > 0 ? ` (+${fmtDist(haversineDist(measurePts[i-1].lat, measurePts[i-1].lng, p.lat, p.lng))})` : '';
+    L.circleMarker(p, { radius:5, color:'#e94560', fillColor:'#fff', fillOpacity:1, weight:2 })
+      .bindTooltip(`${label}${segDist}`, { permanent:true, direction:'top', className:'measure-tooltip', offset:[0,-4] })
+      .addTo(measureLayer);
+  }
+  measureLayer.addTo(map);
+}
+
+function toggleMeasure() {
+  measureMode = !measureMode;
+  const btn = document.getElementById('btn-measure');
+  if (measureMode) {
+    btn.classList.add('active');
+    btn.title = 'Measuring — click map to add points · Esc or click again to clear';
+    map.getContainer().style.cursor = 'crosshair';
+    setStatus('Measure mode: click map to add waypoints. Esc or 📏 to stop.');
+  } else {
+    btn.classList.remove('active');
+    btn.title = 'Measure distance (click to start, Esc to clear)';
+    map.getContainer().style.cursor = '';
+    clearMeasure();
+    setStatus('Measure cleared.');
+  }
+}
+
+document.getElementById('btn-measure').addEventListener('click', toggleMeasure);
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && measureMode) toggleMeasure();
 });
 
 // Print styles
