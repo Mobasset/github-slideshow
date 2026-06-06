@@ -929,7 +929,8 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
 
     <div class="sec-hdr">Visualization Mode</div>
     <div class="radio-grp">
-      <label><input type="radio" name="viz" value="dots" checked> Colored Dots</label>
+      <label><input type="radio" name="viz" value="raster" checked> Raster Grid</label>
+      <label><input type="radio" name="viz" value="dots"> Colored Dots</label>
       <label><input type="radio" name="viz" value="heatmap"> Heatmap</label>
       <label><input type="radio" name="viz" value="cluster"> Event Clusters</label>
     </div>
@@ -989,12 +990,13 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
     <div id="map-container">
       <div id="map"></div>
       <div id="map-legend">
-        <div style="color:#e94560;font-weight:bold;font-size:10px;margin-bottom:4px">RSRP</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#2ecc71"></div>Excellent ≥ −80</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#a8d08d"></div>Good −80 to −90</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#f0a500"></div>Fair −90 to −100</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#e06000"></div>Poor −100 to −110</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#c0392b"></div>Bad &lt; −110</div>
+        <div style="color:#e94560;font-weight:bold;font-size:10px;margin-bottom:4px">Raster Serving RSRP</div>
+        <div style="color:#aaa;font-size:9px;margin-bottom:5px">Unit: dBm</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#2ecc71;border-radius:2px"></div>Excellent ≥ −80</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#a8d08d;border-radius:2px"></div>Good −80 to −90</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#f0a500;border-radius:2px"></div>Fair −90 to −100</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#e06000;border-radius:2px"></div>Poor −100 to −110</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#c0392b;border-radius:2px"></div>Bad &lt; −110</div>
       </div>
     </div>
 
@@ -1412,10 +1414,26 @@ function buildCellDb(cellMeta) {
   const db = {};
   for (const c of cellMeta) {
     if (c.cell_id && isFinite(c.lat) && isFinite(c.lon))
-      db[c.cell_id] = { lat: c.lat, lon: c.lon, site: c.site };
+      db[c.cell_id] = { lat: c.lat, lon: c.lon, az: c.az || 0, site: c.site };
   }
   console.log(`[cellDb] built with ${Object.keys(db).length} cells. Keys (first 5): ${Object.keys(db).slice(0,5).join(', ')}`);
   return db;
+}
+
+// Estimate UE position using serving-cell azimuth + RSRP-derived distance.
+// Same RNTI → same angle (deterministic); RSRP drives distance from tower.
+// Path-loss model: d = 100m at -95 dBm, exponent 3.5 (urban macro LTE).
+function _estimateByAzimuth(lat, lon, az_deg, rsrp_dbm, rnti, seed) {
+  const rsrp = (rsrp_dbm != null && isFinite(rsrp_dbm) && rsrp_dbm > -135)
+    ? rsrp_dbm : -100;
+  const d = Math.max(30, Math.min(1500, 100 * Math.pow(10, (-95 - rsrp) / 35)));
+  const h = rnti > 0 ? rnti : Math.abs((seed * 2654435761) >>> 0);
+  const frac = ((h * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const angle_rad = (az_deg + (frac - 0.5) * 120) * Math.PI / 180;
+  return {
+    lat: lat + (d * Math.cos(angle_rad)) / 111111,
+    lon: lon + (d * Math.sin(angle_rad)) / (111111 * Math.cos(lat * Math.PI / 180)),
+  };
 }
 
 function _weightedCentroid(cellRsrp, cellDb) {
@@ -1480,20 +1498,43 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
       if (samp.latitude != null) continue;
       const pos2 = _weightedCentroid(cellRsrp, cellDb);
       if (pos2) {
-        samp.latitude  = pos2.lat;
-        samp.longitude = pos2.lon;
+        // If centroid is co-located with the best-RSRP cell (all cells on same tower),
+        // use azimuth + distance estimation for geographic spread.
+        const bestCid = Object.entries(cellRsrp).reduce((a, b) => a[1] > b[1] ? a : b)[0];
+        const bestCell = cellDb[bestCid];
+        const coLocated = bestCell &&
+          Math.abs(pos2.lat - bestCell.lat) < 1e-4 &&
+          Math.abs(pos2.lon - bestCell.lon) < 1e-4;
+        if (coLocated && bestCell.az != null) {
+          const est = _estimateByAzimuth(
+            bestCell.lat, bestCell.lon, bestCell.az,
+            cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0);
+          samp.latitude  = est.lat;
+          samp.longitude = est.lon;
+        } else {
+          samp.latitude  = pos2.lat;
+          samp.longitude = pos2.lon;
+        }
         pass1++;
       }
     }
   }
 
-  // Pass 2: fallback — place RNTI=0 / unpositioned at serving cell tower
+  // Pass 2: RNTI=0 / unpositioned — use azimuth+distance if available
   for (const s of samples) {
     if (s.latitude != null) continue;
     const cell = cellDb[String(s.cell_id)];
     if (!cell) continue;
-    s.latitude  = cell.lat;
-    s.longitude = cell.lon;
+    if (cell.az != null) {
+      const seed = (s.timestamp_ms || 0) ^ (s.cell_id || 0);
+      const est = _estimateByAzimuth(cell.lat, cell.lon, cell.az,
+        s.rsrp_dbm, 0, seed);
+      s.latitude  = est.lat;
+      s.longitude = est.lon;
+    } else {
+      s.latitude  = cell.lat;
+      s.longitude = cell.lon;
+    }
     pass2++;
   }
 
@@ -1994,7 +2035,8 @@ function renderAll() {
   }
 
   // ── Viz mode ──────────────────────────────────────────────────────────
-  if (viz === 'dots') renderDots(withGps);
+  if (viz === 'raster') renderRaster(withGps);
+  else if (viz === 'dots') renderDots(withGps);
   else if (viz === 'heatmap') renderHeatmap(withGps);
   else if (viz === 'cluster') renderCluster(withGps);
 
@@ -2027,6 +2069,39 @@ function renderDots(samples) {
     marker.on('click', e => { L.DomEvent.stopPropagation(e); showDetail(s); });
     marker.addTo(dotLayer);
   });
+  dotLayer.addTo(map);
+}
+
+// Raster grid: bin samples into geographic squares, draw one colored rectangle per bin.
+// Grid cell = ~50 m. Color = median RSRP in bin. Same style as Ericsson VDT screenshots.
+function renderRaster(samples) {
+  const gridDeg = 0.00045; // ≈50 m at equator
+  const half = gridDeg / 2;
+  const grid = {};
+  for (const s of samples) {
+    const gr = Math.round(s.latitude  / gridDeg) * gridDeg;
+    const gc = Math.round(s.longitude / gridDeg) * gridDeg;
+    const key = gr.toFixed(6) + ',' + gc.toFixed(6);
+    if (!grid[key]) grid[key] = { lat: gr, lon: gc, rsrps: [], best: s };
+    if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm)) grid[key].rsrps.push(s.rsrp_dbm);
+  }
+  dotLayer = L.layerGroup();
+  for (const g of Object.values(grid)) {
+    const sorted = g.rsrps.slice().sort((a, b) => a - b);
+    const median = sorted.length
+      ? sorted[Math.floor(sorted.length / 2)]
+      : null;
+    let bin = RSRP_BINS[RSRP_BINS.length - 1];
+    for (const b of RSRP_BINS) if (median != null && median >= b.min && median < b.max) { bin = b; break; }
+    const color = median != null ? bin.color : '#555';
+    const rect = L.rectangle(
+      [[g.lat - half, g.lon - half], [g.lat + half, g.lon + half]],
+      { color: 'transparent', fillColor: color, fillOpacity: 0.75, weight: 0 }
+    );
+    rect.bindTooltip(`RSRP: ${median != null ? median.toFixed(0) : 'N/A'} dBm<br>Samples: ${g.rsrps.length}`, { sticky: true });
+    rect.on('click', e => { L.DomEvent.stopPropagation(e); showDetail(g.best); });
+    rect.addTo(dotLayer);
+  }
   dotLayer.addTo(map);
 }
 
