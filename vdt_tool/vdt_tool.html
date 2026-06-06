@@ -935,6 +935,13 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
       <label><input type="radio" name="viz" value="cluster"> Event Clusters</label>
     </div>
 
+    <div class="sec-hdr" id="raster-agg-hdr">Raster Aggregation</div>
+    <select id="sel-raster-agg" style="margin-bottom:6px">
+      <option value="median">Median</option>
+      <option value="average">Average</option>
+      <option value="max">Max (Best)</option>
+    </select>
+
     <div class="sec-hdr">Metric (Heatmap)</div>
     <select id="sel-metric">
       <option value="rsrp_dbm">RSRP (dBm)</option>
@@ -2077,7 +2084,18 @@ function renderDots(samples) {
 
 // Raster grid: bin samples into geographic squares, draw one colored rectangle per bin.
 // Grid cell = ~50 m. Color = median RSRP in bin. Same style as Ericsson VDT screenshots.
+function _rasterAggregate(rsrps, method) {
+  if (!rsrps.length) return null;
+  if (method === 'max') return Math.max(...rsrps);
+  if (method === 'average') return rsrps.reduce((a, b) => a + b, 0) / rsrps.length;
+  // default: median
+  const s = rsrps.slice().sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
 function renderRaster(samples) {
+  const agg    = document.getElementById('sel-raster-agg').value;
+  const labels = { median: 'Median', average: 'Avg', max: 'Max' };
   const gridDeg = 0.00045; // ≈50 m at equator
   const half = gridDeg / 2;
   const grid = {};
@@ -2090,18 +2108,16 @@ function renderRaster(samples) {
   }
   dotLayer = L.layerGroup();
   for (const g of Object.values(grid)) {
-    const sorted = g.rsrps.slice().sort((a, b) => a - b);
-    const median = sorted.length
-      ? sorted[Math.floor(sorted.length / 2)]
-      : null;
+    const val = _rasterAggregate(g.rsrps, agg);
     let bin = RSRP_BINS[RSRP_BINS.length - 1];
-    for (const b of RSRP_BINS) if (median != null && median >= b.min && median < b.max) { bin = b; break; }
-    const color = median != null ? bin.color : '#555';
+    for (const b of RSRP_BINS) if (val != null && val >= b.min && val < b.max) { bin = b; break; }
+    const color = val != null ? bin.color : '#555';
     const rect = L.rectangle(
       [[g.lat - half, g.lon - half], [g.lat + half, g.lon + half]],
       { color: 'transparent', fillColor: color, fillOpacity: 0.75, weight: 0 }
     );
-    rect.bindTooltip(`RSRP: ${median != null ? median.toFixed(0) : 'N/A'} dBm<br>Samples: ${g.rsrps.length}`, { sticky: true });
+    const tip = val != null ? `${labels[agg]} RSRP: ${val.toFixed(1)} dBm` : 'No RSRP';
+    rect.bindTooltip(`${tip}<br>Samples: ${g.rsrps.length}`, { sticky: true });
     rect.on('click', e => { L.DomEvent.stopPropagation(e); showDetail(g.best); });
     rect.addTo(dotLayer);
   }
@@ -2706,6 +2722,7 @@ document.getElementById('btn-process').addEventListener('click', processFiles);
 
 document.querySelectorAll('input[name=viz]').forEach(r => r.addEventListener('change', renderAll));
 document.getElementById('sel-metric').addEventListener('change', renderAll);
+document.getElementById('sel-raster-agg').addEventListener('change', renderAll);
 document.getElementById('chk-track').addEventListener('change', renderAll);
 document.getElementById('chk-sites').addEventListener('change', renderAll);
 document.getElementById('chk-sectors').addEventListener('change', renderAll);
