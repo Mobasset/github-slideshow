@@ -951,6 +951,15 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
       <option value="max">Max (Best)</option>
     </select>
 
+    <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Min samples per cell</label>
+    <select id="sel-raster-min-n" style="margin-bottom:6px">
+      <option value="1">1 (show all)</option>
+      <option value="2" selected>2 (recommended)</option>
+      <option value="3">3</option>
+      <option value="5">5</option>
+      <option value="10">10</option>
+    </select>
+
     <div class="sec-hdr">Metric (Raster &amp; Heatmap)</div>
     <select id="sel-metric">
       <option value="rsrp_dbm">RSRP (dBm)</option>
@@ -1095,15 +1104,20 @@ const METRIC_META = {
   throughput_dl_mbps: { label:'Raster DL Throughput',unit:'Mbps'},
 };
 
-function updateLegend(metric) {
+function updateLegend(metric, stats) {
   const bins = METRIC_BINS[metric] || RSRP_BINS;
   const meta = METRIC_META[metric] || METRIC_META.rsrp_dbm;
   const rows = bins.slice().reverse().map(b =>
     `<div class="legend-row"><div class="legend-dot" style="background:${b.color};border-radius:2px"></div>${b.label}</div>`
   ).join('');
+  const statsHtml = stats
+    ? `<div style="color:#aaa;font-size:9px;margin-top:5px;border-top:1px solid #2a2a4a;padding-top:4px">` +
+      `P5/Median/P95<br>${stats.p5.toFixed(0)} / ${stats.med.toFixed(0)} / ${stats.p95.toFixed(0)} ${meta.unit}` +
+      `<br><span style="color:#e94560;font-size:9px">⚠ MR data: weak-signal biased</span></div>`
+    : '';
   document.getElementById('map-legend').innerHTML =
     `<div style="color:#fff;font-weight:bold;font-size:11px;margin-bottom:2px">${meta.label}</div>` +
-    `<div style="color:#ccc;font-size:10px;margin-bottom:6px">Unit: ${meta.unit}</div>` + rows;
+    `<div style="color:#ccc;font-size:10px;margin-bottom:6px">Unit: ${meta.unit}</div>` + rows + statsHtml;
 }
 
 const EVENT_COLORS = {
@@ -2101,7 +2115,15 @@ function renderAll() {
     sectors: document.getElementById('chk-sectors').checked,
     events:  document.getElementById('chk-events').checked,
   };
-  updateLegend(document.getElementById('sel-metric').value);
+  const metric = document.getElementById('sel-metric').value;
+  // Compute P5/median/P95 of current metric for legend stats
+  const metricVals = state.filtered.map(s=>s[metric]).filter(v=>v!=null&&isFinite(v)).sort((a,b)=>a-b);
+  const legendStats = metricVals.length >= 3 ? {
+    p5:  metricVals[Math.floor(metricVals.length * 0.05)],
+    med: metricVals[Math.floor(metricVals.length * 0.50)],
+    p95: metricVals[Math.floor(metricVals.length * 0.95)],
+  } : null;
+  updateLegend(metric, legendStats);
   clearAllLayers();
   const samples = state.filtered;
   if (!samples.length) return;
@@ -2166,10 +2188,11 @@ function _rasterAggregate(rsrps, method) {
 }
 
 function renderRaster(samples) {
-  const agg     = document.getElementById('sel-raster-agg').value;
-  const metric  = document.getElementById('sel-metric').value;
-  const bins    = METRIC_BINS[metric] || RSRP_BINS;
-  const meta    = METRIC_META[metric] || METRIC_META.rsrp_dbm;
+  const agg      = document.getElementById('sel-raster-agg').value;
+  const metric   = document.getElementById('sel-metric').value;
+  const minN     = parseInt(document.getElementById('sel-raster-min-n').value) || 1;
+  const bins     = METRIC_BINS[metric] || RSRP_BINS;
+  const meta     = METRIC_META[metric] || METRIC_META.rsrp_dbm;
   const aggLabel = { median:'Median', average:'Avg', max:'Max' }[agg] || agg;
 
   const gridDeg = 0.00045; // ≈50 m at equator
@@ -2183,22 +2206,33 @@ function renderRaster(samples) {
     const v = s[metric];
     if (v != null && isFinite(v)) grid[key].vals.push(v);
   }
+  let drawnCells = 0, skippedNoData = 0, skippedMinN = 0;
   dotLayer = L.layerGroup();
   for (const g of Object.values(grid)) {
+    if (g.vals.length === 0) { skippedNoData++; continue; }   // no valid metric data — skip
+    if (g.vals.length < minN) { skippedMinN++; continue; }    // below minimum sample threshold
     const val = _rasterAggregate(g.vals, agg);
     let bin = bins[bins.length - 1];
     for (const b of bins) if (val != null && val >= b.min && val < b.max) { bin = b; break; }
-    const color = val != null ? bin.color : '#555';
     const rect = L.rectangle(
       [[g.lat - half, g.lon - half], [g.lat + half, g.lon + half]],
-      { color: 'transparent', fillColor: color, fillOpacity: 0.75, weight: 0 }
+      { color: 'transparent', fillColor: bin.color, fillOpacity: 0.75, weight: 0 }
     );
-    const valStr = val != null ? `${val.toFixed(1)} ${meta.unit}` : 'N/A';
-    rect.bindTooltip(`${meta.label}<br>${aggLabel}: ${valStr}<br>Samples: ${g.vals.length || g.best && 1}`, { sticky: true });
+    const valStr = `${val.toFixed(1)} ${meta.unit}`;
+    const rangeStr = g.vals.length > 1
+      ? `Range: ${Math.min(...g.vals).toFixed(0)} / ${Math.max(...g.vals).toFixed(0)}`
+      : '';
+    rect.bindTooltip(
+      `${meta.label}<br>${aggLabel}: <b>${valStr}</b><br>Samples: ${g.vals.length}${rangeStr ? '<br>'+rangeStr : ''}`,
+      { sticky: true }
+    );
     rect.on('click', e => { L.DomEvent.stopPropagation(e); showDetail(g.best); });
     rect.addTo(dotLayer);
+    drawnCells++;
   }
   dotLayer.addTo(map);
+  if (skippedNoData + skippedMinN > 0)
+    setStatus(`Raster: ${drawnCells} cells drawn · ${skippedNoData} no-data · ${skippedMinN} below min-${minN} threshold`);
 }
 
 function renderHeatmap(samples) {
@@ -2817,6 +2851,7 @@ document.getElementById('sel-metric').addEventListener('change', () => {
   renderAll();
 });
 document.getElementById('sel-raster-agg').addEventListener('change', renderAll);
+document.getElementById('sel-raster-min-n').addEventListener('change', renderAll);
 document.getElementById('chk-track').addEventListener('change', renderAll);
 document.getElementById('chk-sites').addEventListener('change', renderAll);
 document.getElementById('chk-sectors').addEventListener('change', renderAll);
