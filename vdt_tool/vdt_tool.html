@@ -894,22 +894,22 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
 
     <div class="input-block">
       <div class="input-label">Cell Trace <span class="fmt-hint">.bin.gz · .csv.gz · .csv</span></div>
-      <label class="up-row"><input type="file" id="file-celltrace" accept=".gz,.csv,.bin" style="display:none">
+      <label class="up-row"><input type="file" id="file-celltrace" accept=".gz,.csv,.bin" multiple style="display:none">
         <span class="up-icon">📡</span><span class="up-name" id="fname-celltrace">No file selected</span></label>
     </div>
     <div class="input-block">
       <div class="input-label">RRC L3 Log <span class="fmt-hint">.log · .txt</span></div>
-      <label class="up-row"><input type="file" id="file-l3" accept=".log,.txt" style="display:none">
+      <label class="up-row"><input type="file" id="file-l3" accept=".log,.txt" multiple style="display:none">
         <span class="up-icon">📋</span><span class="up-name" id="fname-l3">No file selected</span></label>
     </div>
     <div class="input-block">
       <div class="input-label">Events <span class="fmt-hint">.csv · .log</span></div>
-      <label class="up-row"><input type="file" id="file-events" accept=".csv,.log,.txt" style="display:none">
+      <label class="up-row"><input type="file" id="file-events" accept=".csv,.log,.txt" multiple style="display:none">
         <span class="up-icon">⚡</span><span class="up-name" id="fname-events">No file selected</span></label>
     </div>
     <div class="input-block">
       <div class="input-label">GPS Track <span class="fmt-hint">.csv · .kml · .gpx</span></div>
-      <label class="up-row"><input type="file" id="file-gps" accept=".csv,.kml,.gpx" style="display:none">
+      <label class="up-row"><input type="file" id="file-gps" accept=".csv,.kml,.gpx" multiple style="display:none">
         <span class="up-icon">🗺</span><span class="up-name" id="fname-gps">No file selected</span></label>
     </div>
     <div class="input-block">
@@ -942,7 +942,7 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
       <option value="max">Max (Best)</option>
     </select>
 
-    <div class="sec-hdr">Metric (Heatmap)</div>
+    <div class="sec-hdr">Metric (Raster &amp; Heatmap)</div>
     <select id="sel-metric">
       <option value="rsrp_dbm">RSRP (dBm)</option>
       <option value="rsrq_db">RSRQ (dB)</option>
@@ -1045,6 +1045,52 @@ const RSRP_BINS = [
   { min:-115, max:-105,      label:'−115 to −105', color:'#ff0000' },
   { min:-Infinity, max:-115, label:'< −115',        color:'#808080' },
 ];
+
+const METRIC_BINS = {
+  rsrp_dbm: RSRP_BINS,
+  rsrq_db: [
+    { min:-6,        max:Infinity, label:'≥ −6',         color:'#00b050' },
+    { min:-9,        max:-6,       label:'−9 to −6',     color:'#92d050' },
+    { min:-12,       max:-9,       label:'−12 to −9',    color:'#ffff00' },
+    { min:-15,       max:-12,      label:'−15 to −12',   color:'#ff8800' },
+    { min:-19.5,     max:-15,      label:'−19.5 to −15', color:'#ff0000' },
+    { min:-Infinity, max:-19.5,    label:'< −19.5',      color:'#808080' },
+  ],
+  sinr_db: [
+    { min:20,        max:Infinity, label:'≥ 20',          color:'#00b050' },
+    { min:10,        max:20,       label:'10 to 20',      color:'#92d050' },
+    { min:5,         max:10,       label:'5 to 10',       color:'#ffff00' },
+    { min:0,         max:5,        label:'0 to 5',        color:'#ff8800' },
+    { min:-10,       max:0,        label:'−10 to 0',      color:'#ff0000' },
+    { min:-Infinity, max:-10,      label:'< −10',         color:'#808080' },
+  ],
+  throughput_dl_mbps: [
+    { min:25,        max:Infinity, label:'≥ 25 Mbps',    color:'#00b050' },
+    { min:10,        max:25,       label:'10–25 Mbps',   color:'#92d050' },
+    { min:5,         max:10,       label:'5–10 Mbps',    color:'#ffff00' },
+    { min:1,         max:5,        label:'1–5 Mbps',     color:'#ff8800' },
+    { min:0,         max:1,        label:'0–1 Mbps',     color:'#ff0000' },
+    { min:-Infinity, max:0,        label:'No data',      color:'#808080' },
+  ],
+};
+
+const METRIC_META = {
+  rsrp_dbm:           { label:'Raster Serving RSRP', unit:'dBm' },
+  rsrq_db:            { label:'Raster RSRQ',         unit:'dB'  },
+  sinr_db:            { label:'Raster SINR',         unit:'dB'  },
+  throughput_dl_mbps: { label:'Raster DL Throughput',unit:'Mbps'},
+};
+
+function updateLegend(metric) {
+  const bins = METRIC_BINS[metric] || RSRP_BINS;
+  const meta = METRIC_META[metric] || METRIC_META.rsrp_dbm;
+  const rows = bins.slice().reverse().map(b =>
+    `<div class="legend-row"><div class="legend-dot" style="background:${b.color};border-radius:2px"></div>${b.label}</div>`
+  ).join('');
+  document.getElementById('map-legend').innerHTML =
+    `<div style="color:#fff;font-weight:bold;font-size:11px;margin-bottom:2px">${meta.label}</div>` +
+    `<div style="color:#ccc;font-size:10px;margin-bottom:6px">Unit: ${meta.unit}</div>` + rows;
+}
 
 const EVENT_COLORS = {
   INTERNAL_HANDOVER_ATTEMPT:  '#3498db',
@@ -2030,6 +2076,7 @@ function renderAll() {
     sectors: document.getElementById('chk-sectors').checked,
     events:  document.getElementById('chk-events').checked,
   };
+  updateLegend(document.getElementById('sel-metric').value);
   clearAllLayers();
   const samples = state.filtered;
   if (!samples.length) return;
@@ -2094,8 +2141,12 @@ function _rasterAggregate(rsrps, method) {
 }
 
 function renderRaster(samples) {
-  const agg    = document.getElementById('sel-raster-agg').value;
-  const labels = { median: 'Median', average: 'Avg', max: 'Max' };
+  const agg     = document.getElementById('sel-raster-agg').value;
+  const metric  = document.getElementById('sel-metric').value;
+  const bins    = METRIC_BINS[metric] || RSRP_BINS;
+  const meta    = METRIC_META[metric] || METRIC_META.rsrp_dbm;
+  const aggLabel = { median:'Median', average:'Avg', max:'Max' }[agg] || agg;
+
   const gridDeg = 0.00045; // ≈50 m at equator
   const half = gridDeg / 2;
   const grid = {};
@@ -2103,21 +2154,22 @@ function renderRaster(samples) {
     const gr = Math.round(s.latitude  / gridDeg) * gridDeg;
     const gc = Math.round(s.longitude / gridDeg) * gridDeg;
     const key = gr.toFixed(6) + ',' + gc.toFixed(6);
-    if (!grid[key]) grid[key] = { lat: gr, lon: gc, rsrps: [], best: s };
-    if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm)) grid[key].rsrps.push(s.rsrp_dbm);
+    if (!grid[key]) grid[key] = { lat: gr, lon: gc, vals: [], best: s };
+    const v = s[metric];
+    if (v != null && isFinite(v)) grid[key].vals.push(v);
   }
   dotLayer = L.layerGroup();
   for (const g of Object.values(grid)) {
-    const val = _rasterAggregate(g.rsrps, agg);
-    let bin = RSRP_BINS[RSRP_BINS.length - 1];
-    for (const b of RSRP_BINS) if (val != null && val >= b.min && val < b.max) { bin = b; break; }
+    const val = _rasterAggregate(g.vals, agg);
+    let bin = bins[bins.length - 1];
+    for (const b of bins) if (val != null && val >= b.min && val < b.max) { bin = b; break; }
     const color = val != null ? bin.color : '#555';
     const rect = L.rectangle(
       [[g.lat - half, g.lon - half], [g.lat + half, g.lon + half]],
       { color: 'transparent', fillColor: color, fillOpacity: 0.75, weight: 0 }
     );
-    const tip = val != null ? `${labels[agg]} RSRP: ${val.toFixed(1)} dBm` : 'No RSRP';
-    rect.bindTooltip(`${tip}<br>Samples: ${g.rsrps.length}`, { sticky: true });
+    const valStr = val != null ? `${val.toFixed(1)} ${meta.unit}` : 'N/A';
+    rect.bindTooltip(`${meta.label}<br>${aggLabel}: ${valStr}<br>Samples: ${g.vals.length || g.best && 1}`, { sticky: true });
     rect.on('click', e => { L.DomEvent.stopPropagation(e); showDetail(g.best); });
     rect.addTo(dotLayer);
   }
@@ -2555,22 +2607,30 @@ ${styles}
 // FILE STAGING + PROCESS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const stagedFiles = { celltrace:null, l3:null, events:null, gps:null, meta:null };
+const stagedFiles = { celltrace:[], l3:[], events:[], gps:[], meta:null };
 
 function stageFile(inputId, type) {
   const input = document.getElementById(inputId);
-  const file = input.files[0];
-  if (!file) return;
-  stagedFiles[type] = file;
-  const nameEl = document.getElementById(`fname-${type}`);
-  nameEl.textContent = file.name;
-  nameEl.classList.add('staged');
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  if (type === 'meta') {
+    stagedFiles.meta = files[0];
+    const nameEl = document.getElementById('fname-meta');
+    nameEl.textContent = files[0].name;
+    nameEl.classList.add('staged');
+    setStatus(`Staged: ${files[0].name}`);
+  } else {
+    stagedFiles[type] = files;          // replace each time (browser multi-select)
+    const nameEl = document.getElementById(`fname-${type}`);
+    nameEl.textContent = files.length === 1 ? files[0].name : `${files.length} files`;
+    nameEl.classList.add('staged');
+    setStatus(`Staged: ${files.length} file${files.length > 1 ? 's' : ''} — click Process Files to load.`);
+  }
   document.getElementById('btn-process').disabled = false;
-  setStatus(`Staged: ${file.name} — click Process Files to load.`);
 }
 
 async function processFiles() {
-  const hasFile = Object.values(stagedFiles).some(f => f);
+  const hasFile = Object.values(stagedFiles).some(f => Array.isArray(f) ? f.length > 0 : !!f);
   if (!hasFile) { setStatus('No files selected.'); return; }
 
   const btn = document.getElementById('btn-process');
@@ -2589,36 +2649,36 @@ async function processFiles() {
 
     let newSamples = [];
 
-    // 2. Cell trace (Ericsson CTR .bin.gz / .bin, .csv.gz / .csv, or generic flat CSV)
-    if (stagedFiles.celltrace) {
-      const fname = stagedFiles.celltrace.name.toLowerCase();
+    // 2. Cell trace – process every staged file
+    for (const ctrFile of stagedFiles.celltrace) {
+      const fname = ctrFile.name.toLowerCase();
       const isBinary = fname.endsWith('.bin.gz') || fname.endsWith('.bin');
       let parsed = [];
       if (isBinary) {
         try {
-          setStatus('⏳ Decompressing binary cell trace…');
+          setStatus(`⏳ Decompressing ${ctrFile.name}…`);
           const bytes = fname.endsWith('.gz')
-            ? await decompressGzipBytes(stagedFiles.celltrace)
-            : new Uint8Array(await stagedFiles.celltrace.arrayBuffer());
-          parsed = parseEricssonCTraceBinary(bytes, stagedFiles.celltrace.name);
+            ? await decompressGzipBytes(ctrFile)
+            : new Uint8Array(await ctrFile.arrayBuffer());
+          parsed = parseEricssonCTraceBinary(bytes, ctrFile.name);
         } catch(e) {
-          msgs.push(`⚠ Binary CTR parse failed: ${e.message}`);
+          msgs.push(`⚠ ${ctrFile.name}: binary parse failed — ${e.message}`);
         }
       } else {
         let text = null;
         if (fname.endsWith('.gz')) {
           try {
-            setStatus('⏳ Decompressing cell trace…');
-            text = await decompressGzip(stagedFiles.celltrace);
+            setStatus(`⏳ Decompressing ${ctrFile.name}…`);
+            text = await decompressGzip(ctrFile);
           } catch(e) {
-            msgs.push(`⚠ Decompress failed: ${e.message}`);
+            msgs.push(`⚠ ${ctrFile.name}: decompress failed — ${e.message}`);
           }
         } else {
-          text = await stagedFiles.celltrace.text();
+          text = await ctrFile.text();
         }
         if (text) {
           if (text.slice(0, 300).includes('ERBS_Name') || text.slice(0, 300).includes('Global_Cell_ID')) {
-            parsed = parseEricssonCTrace(text, stagedFiles.celltrace.name);
+            parsed = parseEricssonCTrace(text, ctrFile.name);
           } else {
             parsed = parseCellTraceCsv(text);
           }
@@ -2630,30 +2690,30 @@ async function processFiles() {
         parsed.forEach(enrichSample);
         newSamples = newSamples.concat(parsed);
         const locCount = parsed.filter(s => s.latitude != null).length;
-        msgs.push(`Cell trace: ${parsed.length} records · ${locCount} positioned`);
+        msgs.push(`${ctrFile.name}: ${parsed.length} records · ${locCount} positioned`);
         if (locCount === 0 && dbSize > 0)
-          msgs.push('⚠ 0 positioned — cell_id mismatch? Open DevTools console for details');
+          msgs.push(`⚠ ${ctrFile.name}: 0 positioned — cell_id mismatch?`);
         else if (dbSize === 0)
           msgs.push('⚠ No cell metadata — upload DB.csv to enable positioning');
       }
     }
 
     // 3. L3 RRC log
-    if (stagedFiles.l3) {
-      const text = await stagedFiles.l3.text();
+    for (const l3File of stagedFiles.l3) {
+      const text = await l3File.text();
       const parsed = parseL3Log(text);
       parsed.forEach(enrichSample);
       newSamples = newSamples.concat(parsed);
-      msgs.push(`L3 log: ${parsed.length} records`);
+      msgs.push(`L3 log (${l3File.name}): ${parsed.length} records`);
     }
 
     // 4. Events CSV / log
-    if (stagedFiles.events) {
-      const text = await stagedFiles.events.text();
+    for (const evFile of stagedFiles.events) {
+      const text = await evFile.text();
       const parsed = parseEventsCsv(text);
       parsed.forEach(enrichSample);
       newSamples = newSamples.concat(parsed);
-      msgs.push(`Events: ${parsed.length} records`);
+      msgs.push(`Events (${evFile.name}): ${parsed.length} records`);
     }
 
     // Load all non-GPS samples first
@@ -2662,24 +2722,30 @@ async function processFiles() {
     }
 
     // 5. GPS correlation last (needs samples in state)
-    if (stagedFiles.gps) {
-      const text = await stagedFiles.gps.text();
-      const fname = stagedFiles.gps.name.toLowerCase();
+    let allGpsPts = [];
+    for (const gpsFile of stagedFiles.gps) {
+      const text = await gpsFile.text();
+      const fname = gpsFile.name.toLowerCase();
       let gpsPts = [];
       if (fname.endsWith('.kml'))      gpsPts = parseGpsKml(text);
       else if (fname.endsWith('.gpx')) gpsPts = parseGpsGpx(text);
       else                             gpsPts = parseGpsCsv(text);
-      state.samples = correlateGps(state.samples, gpsPts);
+      allGpsPts = allGpsPts.concat(gpsPts);
+    }
+    if (allGpsPts.length) {
+      state.samples = correlateGps(state.samples, allGpsPts);
       state.samples.forEach(enrichSample);
       state.filtered = applyFilters(state.samples);
       renderAll();
       renderTimeline(state.filtered);
       updateKpiPanel(computeKpis(state.filtered));
-      msgs.push(`GPS: ${gpsPts.length} pts correlated`);
+      msgs.push(`GPS: ${allGpsPts.length} pts correlated`);
     }
 
     // Reset staged state
-    Object.keys(stagedFiles).forEach(k => stagedFiles[k] = null);
+    Object.keys(stagedFiles).forEach(k => {
+      stagedFiles[k] = Array.isArray(stagedFiles[k]) ? [] : null;
+    });
     ['celltrace','l3','events','gps','meta'].forEach(t => {
       const el = document.getElementById(`fname-${t}`);
       el.textContent = 'No file selected';
@@ -2721,7 +2787,10 @@ document.getElementById('file-meta').addEventListener('change', () => stageFile(
 document.getElementById('btn-process').addEventListener('click', processFiles);
 
 document.querySelectorAll('input[name=viz]').forEach(r => r.addEventListener('change', renderAll));
-document.getElementById('sel-metric').addEventListener('change', renderAll);
+document.getElementById('sel-metric').addEventListener('change', () => {
+  updateLegend(document.getElementById('sel-metric').value);
+  renderAll();
+});
 document.getElementById('sel-raster-agg').addEventListener('change', renderAll);
 document.getElementById('chk-track').addEventListener('change', renderAll);
 document.getElementById('chk-sites').addEventListener('change', renderAll);
