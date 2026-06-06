@@ -992,12 +992,11 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
     <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Filter by Cell ID</label>
     <select id="sel-cell-filter" multiple style="height:60px;margin-bottom:6px"></select>
 
+    <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Filter by EARFCN</label>
+    <select id="sel-earfcn-filter" multiple style="height:50px;margin-bottom:6px"></select>
+
     <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Technology</label>
-    <select id="sel-tech" multiple style="height:50px;margin-bottom:6px">
-      <option value="LTE">LTE</option>
-      <option value="NR">NR (5G)</option>
-      <option value="2G">2G</option>
-    </select>
+    <select id="sel-tech" multiple style="height:50px;margin-bottom:6px"></select>
 
     <div class="sec-hdr">Export</div>
     <div class="export-grid">
@@ -1304,13 +1303,18 @@ function classifyRsrp(v) {
 }
 
 function enrichSample(s) {
-  const bin = classifyRsrp(s.rsrp_dbm ?? -999);
-  s.rsrp_class = bin.label;
-  s.rsrp_color = bin.color;
-  // Tech from EARFCN if not set
+  if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm)) {
+    const bin = classifyRsrp(s.rsrp_dbm);
+    s.rsrp_class = bin.label;
+    s.rsrp_color = bin.color;
+  } else {
+    s.rsrp_class = 'N/A';
+    s.rsrp_color = '#555555';
+  }
   if (!s.tech) {
     const e = s.earfcn || 0;
-    s.tech = e >= 600000 ? 'NR' : e <= 1023 ? '2G' : 'LTE';
+    // earfcn=0 means not set (common in binary CTR) → LTE; >599999 → NR
+    s.tech = e > 599999 ? 'NR' : 'LTE';
   }
   return s;
 }
@@ -2033,7 +2037,12 @@ function computeKpis(samples) {
 
   const bins = {};
   RSRP_BINS.forEach(b=>bins[b.label]=0);
-  samples.forEach(s=>{ if(s.rsrp_class) bins[s.rsrp_class]=(bins[s.rsrp_class]||0)+1; });
+  let naRsrp = 0;
+  samples.forEach(s=>{
+    if (!s.rsrp_class || s.rsrp_class === 'N/A') { naRsrp++; return; }
+    bins[s.rsrp_class] = (bins[s.rsrp_class]||0)+1;
+  });
+  const rsrpValid = n - naRsrp;
 
   const ueSet = new Set(samples.map(s=>s.rnti).filter(r=>r && r !== 0));
   const ueCount = ueSet.size;
@@ -2044,7 +2053,7 @@ function computeKpis(samples) {
     rsrqMedian: median(rsrq), sinrMedian: median(sinr),
     dlMedian: median(dl),
     hoAtt, hoSucc, hoFail, hoSR: pct(hoSucc,hoAtt),
-    rlf, rlfRate: pct(rlf,n,10000), scg, bins,
+    rlf, rlfRate: pct(rlf,n,10000), scg, bins, naRsrp, rsrpValid,
   };
 }
 
@@ -2161,18 +2170,40 @@ function renderAll() {
 }
 
 function renderDots(samples) {
+  // Aggregate overlapping samples into grid cells (same resolution as raster).
+  // Each cell shows the aggregated (median) metric color so overlapping dots
+  // don't randomly show whichever was drawn last.
+  const metric   = document.getElementById('sel-metric').value;
+  const agg      = document.getElementById('sel-raster-agg').value;
+  const bins     = METRIC_BINS[metric] || RSRP_BINS;
+  const gridDeg  = 0.00045;
+  const grid = {};
+  for (const s of samples) {
+    const gr  = Math.round(s.latitude  / gridDeg) * gridDeg;
+    const gc  = Math.round(s.longitude / gridDeg) * gridDeg;
+    const key = gr.toFixed(6) + ',' + gc.toFixed(6);
+    if (!grid[key]) grid[key] = { lat: gr, lon: gc, vals: [], best: s };
+    const v = s[metric];
+    if (v != null && isFinite(v)) grid[key].vals.push(v);
+  }
   dotLayer = L.layerGroup();
-  const step = samples.length > 30000 ? Math.ceil(samples.length/30000) : 1;
-  samples.forEach((s,i) => {
-    if (i%step!==0) return;
-    const color = s.rsrp_color || '#888';
-    const marker = L.circleMarker([s.latitude,s.longitude], {
-      radius:4, color:color, fillColor:color, fillOpacity:0.8, weight:0,
+  for (const g of Object.values(grid)) {
+    const val   = _rasterAggregate(g.vals, agg);
+    let binMatch = bins[bins.length - 1];
+    if (val != null) for (const b of bins) if (val >= b.min && val < b.max) { binMatch = b; break; }
+    const color  = val != null ? binMatch.color : '#555';
+    const radius = Math.min(6, Math.max(3, 2 + Math.log2(g.vals.length + 1)));
+    const marker = L.circleMarker([g.lat, g.lon], {
+      radius, color:'transparent', fillColor:color, fillOpacity:0.85, weight:0,
     });
-    marker.bindTooltip(buildTooltip(s), {sticky:true, className:'leaflet-popup-content-wrapper'});
-    marker.on('click', e => { L.DomEvent.stopPropagation(e); showDetail(s); });
+    const valStr = val != null ? `${val.toFixed(1)} ${(METRIC_META[metric]||METRIC_META.rsrp_dbm).unit}` : 'N/A';
+    marker.bindTooltip(
+      `${buildTooltip(g.best)}<br><span style="color:#aaa">Agg(${g.vals.length}): ${valStr}</span>`,
+      { sticky:true, className:'leaflet-popup-content-wrapper' }
+    );
+    marker.on('click', e => { L.DomEvent.stopPropagation(e); showDetail(g.best); });
     marker.addTo(dotLayer);
-  });
+  }
   dotLayer.addTo(map);
 }
 
@@ -2235,19 +2266,38 @@ function renderRaster(samples) {
     setStatus(`Raster: ${drawnCells} cells drawn · ${skippedNoData} no-data · ${skippedMinN} below min-${minN} threshold`);
 }
 
+function _buildHeatGradient(metric) {
+  // Build leaflet-heat gradient matching the metric's bin colors (worst→best = 0→1).
+  const bins   = METRIC_BINS[metric] || RSRP_BINS;
+  const ranges = { rsrp_dbm:[-140,-40], rsrq_db:[-19.5,0], sinr_db:[-23,40], throughput_dl_mbps:[0,150] };
+  const [vmin, vmax] = ranges[metric] || [-140, -40];
+  const span   = vmax - vmin || 1;
+  const grad   = {};
+  grad[0]      = bins[bins.length - 1].color;  // worst color at 0
+  grad[1]      = bins[0].color;                 // best color at 1
+  for (const b of bins) {
+    if (isFinite(b.min) && b.min > vmin && b.min < vmax) {
+      grad[+((b.min - vmin) / span).toFixed(3)] = b.color;
+    }
+  }
+  return grad;
+}
+
 function renderHeatmap(samples) {
   const metric = document.getElementById('sel-metric').value;
   const ranges = { rsrp_dbm:[-140,-40], rsrq_db:[-19.5,0], sinr_db:[-23,40], throughput_dl_mbps:[0,150] };
-  const [vmin,vmax] = ranges[metric]||[-140,-40];
+  const [vmin, vmax] = ranges[metric] || [-140, -40];
+  const span = vmax - vmin || 1;
   let pts = samples.map(s => {
     const v = s[metric];
     if (!isFinite(v)) return null;
-    const range = vmax - vmin || 1;
-    const w = Math.max(0, Math.min(1, (v - vmin) / range));
-    return [s.latitude, s.longitude, w];
+    return [s.latitude, s.longitude, Math.max(0, Math.min(1, (v - vmin) / span))];
   }).filter(Boolean);
   if (pts.length > 15000) { const step=Math.ceil(pts.length/15000); pts=pts.filter((_,i)=>i%step===0); }
-  heatLayer = L.heatLayer(pts, { radius:15, blur:20, minOpacity:0.3, max:1 }).addTo(map);
+  heatLayer = L.heatLayer(pts, {
+    radius: 18, blur: 22, minOpacity: 0.35, max: 1,
+    gradient: _buildHeatGradient(metric),
+  }).addTo(map);
 }
 
 function renderCluster(samples) {
@@ -2446,22 +2496,26 @@ function updateKpiPanel(kpis) {
     <div class="kpi-label">SCG Failures</div>
     <div class="kpi-val" style="color:${k.scg>0?'#f39c12':'#e0e0e0'}">${k.scg}</div>
     <div class="kpi-label">DL Throughput</div><div class="kpi-val">${fmt(k.dlMedian,2)} Mbps</div>
-    ${buildCovBar(k.bins, k.n)}
+    ${buildCovBar(k.bins, k.rsrpValid, k.naRsrp)}
   `;
 }
 
-function buildCovBar(bins, total) {
-  if (!total) return '';
+function buildCovBar(bins, validTotal, naCount) {
+  if (!validTotal && !naCount) return '';
   const order  = RSRP_BINS.map(b => b.label).reverse(); // worst→best left-to-right
   const colors = Object.fromEntries(RSRP_BINS.map(b => [b.label, b.color]));
+  const total  = validTotal || 1;
   const segs = order.map(l => {
     const p = ((bins[l]||0)/total*100).toFixed(0);
     return `<div style="flex:${p};min-width:${p>0?'2px':0};background:${colors[l]};height:100%" title="${l}: ${bins[l]||0} (${p}%)"></div>`;
   }).join('');
   const legend = order.map(l=>`<span style="color:${colors[l]};font-size:9px">${(bins[l]||0).toLocaleString()}</span>`).join(' ');
-  return `<div class="kpi-label" style="margin-top:6px">Coverage Bins</div>
+  const naStr = naCount > 0
+    ? `<div style="color:#666;font-size:9px;margin-top:1px">N/A RSRP (excluded): ${naCount.toLocaleString()} samples</div>`
+    : '';
+  return `<div class="kpi-label" style="margin-top:6px">Coverage Bins <span style="color:#666;font-weight:normal">(${validTotal.toLocaleString()} with RSRP)</span></div>
     <div style="display:flex;height:12px;border-radius:3px;overflow:hidden;margin-bottom:2px">${segs}</div>
-    <div style="display:flex;justify-content:space-around;margin-bottom:6px">${legend}</div>`;
+    <div style="display:flex;justify-content:space-around;margin-bottom:2px">${legend}</div>${naStr}`;
 }
 
 function updatePerCellTable(perCell) {
@@ -2512,22 +2566,18 @@ function showDetail(s) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function applyFilters(samples, extra={}) {
-  const rsrpThresh = parseFloat(document.getElementById('rsrp-thresh').value);
-  const cellSel    = [...document.getElementById('sel-cell-filter').selectedOptions].map(o=>String(o.value));
-  const techSel    = [...document.getElementById('sel-tech').selectedOptions].map(o=>o.value);
-  const timeRange  = extra.timeRange || null;
+  const rsrpThresh  = parseFloat(document.getElementById('rsrp-thresh').value);
+  const cellSel     = [...document.getElementById('sel-cell-filter').selectedOptions].map(o=>String(o.value));
+  const earfcnSel   = [...document.getElementById('sel-earfcn-filter').selectedOptions].map(o=>parseInt(o.value));
+  const techSel     = [...document.getElementById('sel-tech').selectedOptions].map(o=>o.value);
+  const timeRange   = extra.timeRange || null;
 
   return samples.filter(s => {
     if (isFinite(s.rsrp_dbm) && s.rsrp_dbm < rsrpThresh) return false;
-    if (cellSel.length && !cellSel.includes(String(s.cell_id))) return false;
-    if (techSel.length) {
-      const e = s.earfcn||0;
-      const t = s.tech || (e>=600000?'NR':e<=1023?'2G':'LTE');
-      if (!techSel.includes(t)) return false;
-    }
-    if (timeRange) {
-      if (s.timestamp_ms < timeRange[0] || s.timestamp_ms > timeRange[1]) return false;
-    }
+    if (cellSel.length  && !cellSel.includes(String(s.cell_id))) return false;
+    if (earfcnSel.length && !earfcnSel.includes(s.earfcn||0)) return false;
+    if (techSel.length  && !techSel.includes(s.tech||'LTE')) return false;
+    if (timeRange && (s.timestamp_ms < timeRange[0] || s.timestamp_ms > timeRange[1])) return false;
     return true;
   });
 }
@@ -2546,6 +2596,18 @@ function populateCellFilter(samples) {
   sel.innerHTML = ids.map(id=>`<option value="${id}">${id}</option>`).join('');
 }
 
+function populateEarfcnFilter(samples) {
+  const sel = document.getElementById('sel-earfcn-filter');
+  const vals = [...new Set(samples.map(s=>s.earfcn).filter(v=>v>0))].sort((a,b)=>a-b);
+  sel.innerHTML = vals.map(e=>`<option value="${e}">${e}</option>`).join('');
+}
+
+function populateTechFilter(samples) {
+  const sel = document.getElementById('sel-tech');
+  const techs = [...new Set(samples.map(s=>s.tech).filter(Boolean))].sort();
+  sel.innerHTML = techs.map(t=>`<option value="${t}">${t}</option>`).join('');
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LOAD DATA PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2560,6 +2622,8 @@ function loadData(newSamples, cellMeta=null) {
   }
   state.filtered = applyFilters(state.samples);
   populateCellFilter(state.samples);
+  populateEarfcnFilter(state.samples);
+  populateTechFilter(state.samples);
   updateKpiPanel(computeKpis(state.filtered));
   renderAll();
   renderTimeline(state.filtered);
@@ -2578,6 +2642,8 @@ function clearAll() {
   document.getElementById('per-cell-wrap').innerHTML='';
   document.getElementById('detail-panel').style.display='none';
   document.getElementById('sel-cell-filter').innerHTML='';
+  document.getElementById('sel-earfcn-filter').innerHTML='';
+  document.getElementById('sel-tech').innerHTML='';
   Plotly.purge(document.getElementById('timeline-chart'));
   setStatus('All data cleared.');
 }
@@ -2864,6 +2930,7 @@ document.getElementById('rsrp-thresh').addEventListener('input', e => {
   refreshFilters();
 });
 document.getElementById('sel-cell-filter').addEventListener('change', refreshFilters);
+document.getElementById('sel-earfcn-filter').addEventListener('change', refreshFilters);
 document.getElementById('sel-tech').addEventListener('change', refreshFilters);
 
 document.getElementById('btn-csv').addEventListener('click', exportCsv);
