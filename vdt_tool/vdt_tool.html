@@ -990,13 +990,14 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
     <div id="map-container">
       <div id="map"></div>
       <div id="map-legend">
-        <div style="color:#e94560;font-weight:bold;font-size:10px;margin-bottom:4px">Raster Serving RSRP</div>
-        <div style="color:#aaa;font-size:9px;margin-bottom:5px">Unit: dBm</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#2ecc71;border-radius:2px"></div>Excellent ≥ −80</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#a8d08d;border-radius:2px"></div>Good −80 to −90</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#f0a500;border-radius:2px"></div>Fair −90 to −100</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#e06000;border-radius:2px"></div>Poor −100 to −110</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#c0392b;border-radius:2px"></div>Bad &lt; −110</div>
+        <div style="color:#fff;font-weight:bold;font-size:11px;margin-bottom:2px">Raster Serving RSRP</div>
+        <div style="color:#ccc;font-size:10px;margin-bottom:6px">Unit: dBm</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#808080;border-radius:2px"></div>value &lt; −115</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#ff0000;border-radius:2px"></div>−115 &lt;= value &lt; −105</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#ff8800;border-radius:2px"></div>−105 &lt;= value &lt; −95</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#ffff00;border-radius:2px"></div>−95 &lt;= value &lt; −85</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#92d050;border-radius:2px"></div>−85 &lt;= value &lt; −75</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#00b050;border-radius:2px"></div>value &gt;= −75</div>
       </div>
     </div>
 
@@ -1030,11 +1031,12 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
 const THEME = { bg:'#1a1a2e', panel:'#16213e', accent:'#0f3460', hl:'#e94560', text:'#e0e0e0', muted:'#888', border:'#2a2a4a' };
 
 const RSRP_BINS = [
-  { min:-80,  max:Infinity, label:'Excellent', color:'#2ecc71' },
-  { min:-90,  max:-80,      label:'Good',      color:'#a8d08d' },
-  { min:-100, max:-90,      label:'Fair',       color:'#f0a500' },
-  { min:-110, max:-100,     label:'Poor',       color:'#e06000' },
-  { min:-Infinity, max:-110, label:'Bad',       color:'#c0392b' },
+  { min:-75,  max:Infinity,  label:'≥ −75',        color:'#00b050' },
+  { min:-85,  max:-75,       label:'−85 to −75',   color:'#92d050' },
+  { min:-95,  max:-85,       label:'−95 to −85',   color:'#ffff00' },
+  { min:-105, max:-95,       label:'−105 to −95',  color:'#ff8800' },
+  { min:-115, max:-105,      label:'−115 to −105', color:'#ff0000' },
+  { min:-Infinity, max:-115, label:'< −115',        color:'#808080' },
 ];
 
 const EVENT_COLORS = {
@@ -1996,6 +1998,7 @@ const TILE_CACHE = {};
 function initMap() {
   map = L.map('map', { zoomControl:true, preferCanvas:true }).setView(CENTER, 13);
   switchTile('dark');
+  L.control.scale({ imperial: false, maxWidth: 200, position: 'bottomleft' }).addTo(map);
   map.on('click', () => { document.getElementById('detail-panel').style.display='none'; });
 }
 
@@ -2322,8 +2325,8 @@ function updateKpiPanel(kpis) {
 
 function buildCovBar(bins, total) {
   if (!total) return '';
-  const order = ['Excellent','Good','Fair','Poor','Bad'];
-  const colors = { Excellent:'#2ecc71', Good:'#a8d08d', Fair:'#f0a500', Poor:'#e06000', Bad:'#c0392b' };
+  const order  = RSRP_BINS.map(b => b.label).reverse(); // worst→best left-to-right
+  const colors = Object.fromEntries(RSRP_BINS.map(b => [b.label, b.color]));
   const segs = order.map(l => {
     const p = ((bins[l]||0)/total*100).toFixed(0);
     return `<div style="flex:${p};min-width:${p>0?'2px':0};background:${colors[l]};height:100%" title="${l}: ${bins[l]||0} (${p}%)"></div>`;
