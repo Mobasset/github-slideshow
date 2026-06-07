@@ -2070,7 +2070,6 @@ function parseEricssonCTraceBinary(bytes, filename) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const records = [];
   const taSources = [];  // {ts, cell_id, ta_cmd} from 0x10 events
-  let offset = 0;
   const len = bytes.length;
 
   function parseTs(h, m, s, ms) {
@@ -2078,6 +2077,49 @@ function parseEricssonCTraceBinary(bytes, filename) {
     return new Date(iso).getTime();
   }
 
+  // ── Pass 1: auto-detect local-cell byte offset ───────────────────────────
+  // Scan up to 2000 measurement events (0x0b / 0x49) and record the set of
+  // distinct values at each candidate byte offset (8–20).  The offset that
+  // shows 2–8 distinct values all ≤ 7 is the local-cell index field.
+  // Falls back to offset 15 (original assumption) if no better candidate found.
+  const _SCAN_POS = [8,9,10,11,12,13,14,15,16,17,18,19,20];
+  const _scanSets = _SCAN_POS.map(() => new Set());
+  let _scanCount = 0, _scanOff = 0;
+  while (_scanOff + 4 <= len && _scanCount < 2000) {
+    const rLen = dv.getUint16(_scanOff, false);
+    if (rLen < 4 || _scanOff + rLen > len) break;
+    if (bytes[_scanOff + 3] === 0x04 && rLen > 4) {
+      const pO = _scanOff + 4, pL = rLen - 4;
+      if (pL >= 21) {
+        const eId = bytes[pO + 2];
+        if (eId === 0x0b || eId === 0x49) {
+          for (let _i = 0; _i < _SCAN_POS.length; _i++)
+            _scanSets[_i].add(bytes[pO + _SCAN_POS[_i]]);
+          _scanCount++;
+        }
+      }
+    }
+    _scanOff += rLen;
+  }
+  // Pick offset with 2–8 distinct values all in 0–7; prefer more distinct.
+  let localCellOff = 15;
+  if (_scanCount >= 5) {
+    let bestScore = _scanSets[_SCAN_POS.indexOf(15)].size === 1 ? -1 : 0;
+    for (let _i = 0; _i < _SCAN_POS.length; _i++) {
+      const s = _scanSets[_i];
+      const distinct = s.size;
+      const maxVal = Math.max(...s);
+      if (distinct >= 2 && distinct <= 8 && maxVal <= 7 && distinct > bestScore) {
+        bestScore = distinct; localCellOff = _SCAN_POS[_i];
+      }
+    }
+  }
+  const scanSummary = _SCAN_POS.map((p,i) => `[${p}]=${_scanSets[i].size}:{${[..._scanSets[i]].sort((a,b)=>a-b).join(',')}}`).join(' ');
+  console.log(`[CTR-Binary] Cell-offset scan (${_scanCount} events): ${scanSummary}`);
+  console.log(`[CTR-Binary] Using local-cell offset: ${localCellOff}`);
+
+  // ── Pass 2: full parse using detected local-cell offset ──────────────────
+  let offset = 0;
   while (offset + 4 <= len) {
     const recLen = dv.getUint16(offset, false);
     if (recLen < 4 || offset + recLen > len) break;
@@ -2093,9 +2135,9 @@ function parseEricssonCTraceBinary(bytes, filename) {
         const ms = dv.getUint16(pOff + 6, false);
         const ts = parseTs(h, m, s, ms);
         let cellId = 0;
-        if (pLen >= 16) {
+        if (pLen >= localCellOff + 1) {
           const enbId = dv.getUint16(pOff + 13, false);
-          cellId = enbId * 1000 + bytes[pOff + 15];
+          cellId = enbId * 1000 + bytes[pOff + localCellOff];
         }
 
         if (evId === 0x10 && pLen >= 100) {        // INTERNAL_PROC_HO_EXEC_X2_OUT
@@ -2147,7 +2189,11 @@ function parseEricssonCTraceBinary(bytes, filename) {
     }
     offset += recLen;
   }
-  return { records, taSources };
+
+  const distinctCells = [...new Set(records.map(r => r.cell_id))];
+  console.log(`[CTR-Binary] Distinct cell_ids in records (${records.length} records): [${distinctCells.join(', ')}]`);
+
+  return { records, taSources, localCellOff, distinctCells };
 }
 
 // ── Ericsson CTR cell trace CSV parser ────────────────────────────────────────
@@ -3245,6 +3291,7 @@ async function processFiles() {
           batchTaSources.push(...result.taSources);
           if (result.taSources.length)
             msgs.push(`${ctrFile.name}: ${result.taSources.length} TA sources (0x10 events)`);
+          msgs.push(`${ctrFile.name}: ${result.distinctCells.length} cell(s) [${result.distinctCells.slice(0,6).join(', ')}] using local-cell byte offset ${result.localCellOff}`);
         } catch(e) {
           msgs.push(`⚠ ${ctrFile.name}: binary parse failed — ${e.message}`);
         }
@@ -3282,7 +3329,15 @@ async function processFiles() {
     // Localize and stage each file's records
     for (const { parsed, name } of ctrBatches) {
       const dbSize = Object.keys(state.cellDb).length;
-      if (dbSize > 0) applyUeLocalization(parsed, state.cellDb);
+      if (dbSize > 0) {
+        // Cell-ID match diagnostic
+        const traceCids = [...new Set(parsed.map(s => String(s.cell_id)))];
+        const matchedCids = traceCids.filter(c => state.cellDb[c]);
+        msgs.push(`Cell match: ${matchedCids.length}/${traceCids.length} cells matched DB (trace: [${traceCids.slice(0,4).join(',')}] DB: [${Object.keys(state.cellDb).slice(0,4).join(',')}])`);
+        if (matchedCids.length === 0)
+          msgs.push(`⚠ No cell IDs match between trace and DB — check eNB ID format in DB.csv`);
+        applyUeLocalization(parsed, state.cellDb);
+      }
       parsed.forEach(enrichSample);
       newSamples = newSamples.concat(parsed);
       const locCount = parsed.filter(s => s.latitude != null).length;
