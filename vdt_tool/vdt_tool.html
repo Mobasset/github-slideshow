@@ -926,11 +926,6 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
       <label class="up-row"><input type="file" id="file-meta" accept=".csv" style="display:none">
         <span class="up-icon">📊</span><span class="up-name" id="fname-meta">No file selected</span></label>
     </div>
-    <div class="input-block">
-      <div class="input-label">Planet CT Export <span class="fmt-hint">.csv</span> <span style="color:#e94560;font-size:9px" title="Planet geolocated call trace CSV — adds TA-positioned samples for comparison">★TA</span></div>
-      <label class="up-row"><input type="file" id="file-planet" accept=".csv" multiple style="display:none">
-        <span class="up-icon">🌍</span><span class="up-name" id="fname-planet">No file selected</span></label>
-    </div>
 
     <button class="btn-process" id="btn-process" disabled>⚙ Process Files</button>
     <button class="btn-demo" id="btn-demo">▶ Load Demo Data</button>
@@ -1147,7 +1142,6 @@ const EVENT_COLORS = {
   NR_SCG_FAILURE:             '#f39c12',
   A3_TRIGGER:                 '#1abc9c',
   A5_TRIGGER:                 '#e67e22',
-  PLANET_GEOLOCATED:          '#00bfff',
 };
 
 const TILE_LAYERS = {
@@ -1509,103 +1503,6 @@ function parseCellMetaCsv(text) {
       height:     parseFloat(row.height) || 30,
     };
   }).filter(r => isFinite(r.lat) && isFinite(r.lon));
-}
-
-// ── Planet Call Trace CSV parser ─────────────────────────────────────────────
-// Parses Planet's geolocated call trace export (File → Export call trace).
-// Columns: Target ID, ..., eNodeBID, Cell ID, EARFCN, PCID, RSRP (dBm),
-//          Timing Advance, ..., RSRQ (dB), DL Data Rate, UL Data Rate,
-//          Latitude/Y, Longitude/X, Height
-// When lat/lon are present Planet has already geolocated; TA is also preserved.
-
-function parsePlanetCsv(text, filename) {
-  const res = Papa.parse(text.trim(), { header:true, dynamicTyping:false, skipEmptyLines:true });
-  if (!res.data.length) return [];
-
-  // Normalize header keys → internal field names (case-insensitive)
-  const hmap = {
-    'target id':          'rnti',
-    'measurement time':   'time_str',
-    'enodebid':           'enb_id',
-    'cell id':            'local_cell',
-    'earfcn':             'earfcn',
-    'pcid':               'pci',
-    'rsrp (dbm)':         'rsrp_dbm',
-    'timing advance':     'ta',
-    'rsrq (db)':          'rsrq_db',
-    'dl data rate (mbps)':'dl_mbps',
-    'ul data rate (mbps)':'ul_mbps',
-    'latitude/y':         'lat',
-    'longitude/x':        'lon',
-    'rsrp':               'rsrp_dbm',   // fallback short names
-    'rsrq':               'rsrq_db',
-    'latitude':           'lat',
-    'longitude':          'lon',
-    'timing_advance':     'ta',
-  };
-
-  // Build column → field mapping from actual header
-  const fieldOf = {};
-  const firstRow = res.data[0] || {};
-  Object.keys(firstRow).forEach(col => {
-    const norm = col.trim().toLowerCase();
-    if (hmap[norm]) fieldOf[col] = hmap[norm];
-  });
-
-  const samples = [];
-  for (const row of res.data) {
-    const g = k => (row[k] != null ? String(row[k]).trim() : '');
-    const fld = {};
-    for (const [col, field] of Object.entries(fieldOf)) fld[field] = g(col);
-
-    const enbId   = parseInt(fld.enb_id)   || 0;
-    const lcell   = parseInt(fld.local_cell)|| 0;
-    const cellId  = enbId ? enbId * 1000 + lcell : lcell;
-
-    const rsrp    = fld.rsrp_dbm !== '' ? parseFloat(fld.rsrp_dbm) : null;
-    const rsrq    = fld.rsrq_db  !== '' ? parseFloat(fld.rsrq_db)  : null;
-    const ta      = fld.ta       !== '' ? parseInt(fld.ta)          : null;
-    const dl      = fld.dl_mbps  !== '' ? parseFloat(fld.dl_mbps)  : null;
-    const lat     = fld.lat      !== '' ? parseFloat(fld.lat)       : null;
-    const lon     = fld.lon      !== '' ? parseFloat(fld.lon)       : null;
-
-    let ts = 0;
-    if (fld.time_str) {
-      const t = new Date(fld.time_str);
-      if (!isNaN(t)) ts = t.getTime();
-    }
-
-    const s = {
-      timestamp_ms: ts,
-      cell_id:      cellId,
-      rnti:         parseInt(fld.rnti) || 0,
-      earfcn:       parseInt(fld.earfcn) || 0,
-      pci:          parseInt(fld.pci) || 0,
-      rsrp_dbm:     (rsrp != null && isFinite(rsrp)) ? rsrp : null,
-      rsrq_db:      (rsrq != null && isFinite(rsrq)) ? rsrq : null,
-      sinr_db:      null,
-      ta_us:        (ta != null && isFinite(ta) && ta >= 0 && ta <= 50000) ? ta : null,
-      throughput_dl_mbps: (dl != null && isFinite(dl)) ? dl : null,
-      throughput_ul_mbps: null,
-      ho_attempt:0, ho_success:0, ho_failure:0,
-      rlf_flag:0, scg_failure:0, a3_trigger:0, a5_trigger:0,
-      event_type:   'PLANET_GEOLOCATED',
-      event_cause:  '',
-      source_file:  filename || 'planet_csv',
-    };
-
-    if (lat != null && isFinite(lat) && lon != null && isFinite(lon)) {
-      s.latitude  = lat;
-      s.longitude = lon;
-    }
-
-    samples.push(s);
-  }
-
-  console.log(`[PlanetCSV] parsed ${samples.length} rows, ` +
-    `${samples.filter(s=>s.ta_us!=null).length} with TA, ` +
-    `${samples.filter(s=>s.latitude!=null).length} with lat/lon`);
-  return samples;
 }
 
 // ── UE position estimation (RSRP weighted centroid) ──────────────────────────
@@ -2468,7 +2365,7 @@ function renderEventMarkers(samples) {
   const evts = samples.filter(s=>s.event_type && EVENT_COLORS[s.event_type]);
   evts.forEach(s => {
     const color = EVENT_COLORS[s.event_type];
-    const sym = { INTERNAL_HANDOVER_FAILURE:'✕', RRC_RLF:'☠', NR_SCG_FAILURE:'⚠', INTERNAL_HANDOVER_SUCCESS:'✓', A3_TRIGGER:'▶', A5_TRIGGER:'◀', INTERNAL_HANDOVER_ATTEMPT:'◈', RRC_MEASUREMENT_REPORT:'·', INTERNAL_EVENT_UE_MOBILITY_EVAL:'◎', INTERNAL_PER_RADIO_UE_MEASUREMENT:'~', PLANET_GEOLOCATED:'★' };
+    const sym = { INTERNAL_HANDOVER_FAILURE:'✕', RRC_RLF:'☠', NR_SCG_FAILURE:'⚠', INTERNAL_HANDOVER_SUCCESS:'✓', A3_TRIGGER:'▶', A5_TRIGGER:'◀', INTERNAL_HANDOVER_ATTEMPT:'◈', RRC_MEASUREMENT_REPORT:'·', INTERNAL_EVENT_UE_MOBILITY_EVAL:'◎', INTERNAL_PER_RADIO_UE_MEASUREMENT:'~' };
     const icon = L.divIcon({
       html:`<div style="background:${color||'#888'};color:#fff;border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:10px;border:1.5px solid rgba(255,255,255,.5)">${sym[s.event_type]||'!'}</div>`,
       className:'', iconSize:[18,18], iconAnchor:[9,9]
@@ -2904,7 +2801,7 @@ ${styles}
 // FILE STAGING + PROCESS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const stagedFiles = { celltrace:[], l3:[], events:[], gps:[], meta:null, planet:[] };
+const stagedFiles = { celltrace:[], l3:[], events:[], gps:[], meta:null };
 
 function stageFile(inputId, type) {
   const input = document.getElementById(inputId);
@@ -3013,20 +2910,6 @@ async function processFiles() {
       msgs.push(`Events (${evFile.name}): ${parsed.length} records`);
     }
 
-    // 4b. Planet geolocated CSV
-    for (const pFile of stagedFiles.planet) {
-      const text = await pFile.text();
-      const parsed = parsePlanetCsv(text, pFile.name);
-      // Apply UE localization for unpositioned records (uses TA if available)
-      if (parsed.filter(s=>s.latitude==null).length > 0 && Object.keys(state.cellDb).length > 0)
-        applyUeLocalization(parsed, state.cellDb);
-      parsed.forEach(enrichSample);
-      newSamples = newSamples.concat(parsed);
-      const taCount  = parsed.filter(s=>s.ta_us!=null).length;
-      const posCount = parsed.filter(s=>s.latitude!=null).length;
-      msgs.push(`Planet CT (${pFile.name}): ${parsed.length} records · ${taCount} with TA · ${posCount} positioned`);
-    }
-
     // Load all non-GPS samples first
     if (newSamples.length) {
       loadData(newSamples, null);
@@ -3057,7 +2940,7 @@ async function processFiles() {
     Object.keys(stagedFiles).forEach(k => {
       stagedFiles[k] = Array.isArray(stagedFiles[k]) ? [] : null;
     });
-    ['celltrace','l3','events','gps','meta','planet'].forEach(t => {
+    ['celltrace','l3','events','gps','meta'].forEach(t => {
       const el = document.getElementById(`fname-${t}`);
       el.textContent = 'No file selected';
       el.classList.remove('staged');
@@ -3095,7 +2978,6 @@ document.getElementById('file-l3').addEventListener('change', () => stageFile('f
 document.getElementById('file-events').addEventListener('change', () => stageFile('file-events','events'));
 document.getElementById('file-gps').addEventListener('change', () => stageFile('file-gps','gps'));
 document.getElementById('file-meta').addEventListener('change', () => stageFile('file-meta','meta'));
-document.getElementById('file-planet').addEventListener('change', () => stageFile('file-planet','planet'));
 document.getElementById('btn-process').addEventListener('click', processFiles);
 
 document.querySelectorAll('input[name=viz]').forEach(r => r.addEventListener('change', renderAll));
