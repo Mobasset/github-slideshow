@@ -969,6 +969,28 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
       <option value="10">10</option>
     </select>
 
+    <div class="sec-hdr">Geolocation Method</div>
+    <div class="radio-grp" style="margin-bottom:4px">
+      <label><input type="radio" name="geomethod" value="rsrp" checked> RSRP Path-Loss</label>
+      <label><input type="radio" name="geomethod" value="planet"> Planet-style</label>
+    </div>
+    <div id="planet-geo-opts" style="display:none;border-left:2px solid #e94560;padding-left:8px;margin-bottom:6px">
+      <div style="font-size:9px;color:#aaa;margin-bottom:5px">Applies Planet's 5 filters:<br>① Min RSRP  ② TA distance  ③ Azimuth+beamwidth<br>④ Best-server (windowed centroid)  ⑤ Clutter (N/A)</div>
+      <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">Min RSRP (dBm)</label>
+      <input type="number" id="geo-min-rsrp" value="-110" step="5" min="-140" max="-40"
+             style="width:80px;background:#1a1a3e;border:1px solid #3a3a6e;color:#e0e0e0;padding:2px 4px;border-radius:3px;margin-bottom:4px">
+      <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">TA distance (m)  <span style="color:#555">min – max</span></label>
+      <div style="display:flex;gap:4px;align-items:center;margin-bottom:6px">
+        <input type="number" id="geo-min-dist" value="0" step="50" min="0" max="500" placeholder="0"
+               style="width:58px;background:#1a1a3e;border:1px solid #3a3a6e;color:#e0e0e0;padding:2px 4px;border-radius:3px">
+        <span style="color:#555;font-size:11px">–</span>
+        <input type="number" id="geo-max-dist" value="1500" step="100" min="100" max="5000" placeholder="1500"
+               style="width:70px;background:#1a1a3e;border:1px solid #3a3a6e;color:#e0e0e0;padding:2px 4px;border-radius:3px">
+      </div>
+      <div style="font-size:9px;color:#666;margin-bottom:5px">TA filter only applies when TA is present in data. Without TA, RSRP path-loss is used as fallback.</div>
+      <button id="btn-regeolocate" style="width:100%;padding:5px;background:#1a1a3e;border:1px solid #e94560;color:#e94560;border-radius:4px;cursor:pointer;font-size:10px;font-weight:bold">↺ Apply Geolocation</button>
+    </div>
+
     <div class="sec-hdr">Metric (Raster &amp; Heatmap)</div>
     <select id="sel-metric">
       <option value="rsrp_dbm">RSRP (dBm)</option>
@@ -1160,10 +1182,12 @@ const N_DEMO  = 2000;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 let state = {
-  samples:  [],   // unified array of sample objects
-  cellMeta: [],   // cell metadata objects
-  cellDb:   {},   // {cell_id → {lat,lon,az,site}} for UE localization
-  filtered: [],   // filtered view of samples
+  samples:     [],   // unified array of sample objects (after localization)
+  rawSamples:  [],   // snapshot before localization (for re-geolocation)
+  gpsPts:      [],   // GPS track points (stored for re-geolocation)
+  cellMeta:    [],   // cell metadata objects
+  cellDb:      {},   // {cell_id → {lat,lon,az,site}} for UE localization
+  filtered:    [],   // filtered view of samples
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1624,6 +1648,7 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
           samp.latitude  = pos2.lat;
           samp.longitude = pos2.lon;
         }
+        samp._geo_synthetic = true;
         pass1++;
       }
     }
@@ -1644,11 +1669,177 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
       s.latitude  = cell.lat;
       s.longitude = cell.lon;
     }
+    s._geo_synthetic = true;
     pass2++;
   }
 
   console.log(`[UE-Loc] positioned: pass1=${pass1}, pass2=${pass2}, total=${pass1+pass2}`);
   return samples;
+}
+
+// ── Planet-style geolocation ──────────────────────────────────────────────────
+// Applies the same 5-filter pipeline Planet uses for call-trace geolocation:
+//   1. Serving cell RSRP filter  — exclude below minRsrp (weak / no-signal areas)
+//   2. TA distance filter        — TA × 78.125 m must be within [minDist, maxDist]
+//   3. Azimuth + beamwidth       — same ±60° sector wedge as VDT (from cell DB az)
+//   4. Best-server approximation — windowed centroid picks the dominant cell
+//   5. Clutter (not applicable without clutter data — omitted)
+// When TA is 0 or unavailable, falls back to RSRP path-loss distance (same as
+// VDT method) so the filter still produces a result.
+
+function applyPlanetLocalization(samples, cellDb, opts = {}) {
+  const minRsrp = opts.minRsrp ?? -110;
+  const minDist = opts.minDist ?? 0;
+  const maxDist = opts.maxDist ?? 1500;
+
+  let pass1 = 0, pass2 = 0, skipRsrp = 0, skipDist = 0;
+
+  // ── Pass 1: RNTI-grouped windowed centroid (same window as VDT method) ──────
+  const groups = {};
+  for (let i = 0; i < samples.length; i++) {
+    const rnti = samples[i].rnti || 0;
+    if (rnti === 0) continue;
+    if (!groups[rnti]) groups[rnti] = [];
+    groups[rnti].push(i);
+  }
+
+  for (const [, indices] of Object.entries(groups)) {
+    indices.sort((a, b) => (samples[a].timestamp_ms || 0) - (samples[b].timestamp_ms || 0));
+    const ts = indices.map(i => samples[i].timestamp_ms || 0);
+    let lo = 0, hi = 0;
+
+    for (let pos = 0; pos < indices.length; pos++) {
+      const t = ts[pos];
+      while (lo < indices.length && ts[lo] < t - _UE_WINDOW_MS) lo++;
+      while (hi < indices.length && ts[hi] <= t + _UE_WINDOW_MS) hi++;
+
+      const samp = samples[indices[pos]];
+      if (samp.latitude != null) continue;
+
+      // Filter 1: minimum serving RSRP
+      if (samp.rsrp_dbm != null && isFinite(samp.rsrp_dbm) && samp.rsrp_dbm < minRsrp) {
+        skipRsrp++;
+        continue;
+      }
+
+      // Build windowed cell→max-RSRP map (best-server approximation)
+      const cellRsrp = {};
+      for (let k = lo; k < hi; k++) {
+        const s2  = samples[indices[k]];
+        const cid = String(s2.cell_id);
+        if (!cellDb[cid]) continue;
+        const r = s2.rsrp_dbm;
+        if (r != null && isFinite(r) && (cellRsrp[cid] == null || r > cellRsrp[cid]))
+          cellRsrp[cid] = r;
+      }
+      if (!Object.keys(cellRsrp).length) continue;
+
+      const pos2 = _weightedCentroid(cellRsrp, cellDb);
+      if (!pos2) continue;
+
+      const bestCid  = Object.entries(cellRsrp).reduce((a, b) => a[1] > b[1] ? a : b)[0];
+      const bestCell = cellDb[bestCid];
+      const coLocated = bestCell &&
+        Math.abs(pos2.lat - bestCell.lat) < 1e-4 &&
+        Math.abs(pos2.lon - bestCell.lon) < 1e-4;
+
+      if (coLocated && bestCell.az != null) {
+        const ta   = samp.ta_us;
+        const dTa  = (ta != null && isFinite(ta) && ta > 0) ? ta * 78.125 : null;
+        // Filter 2: TA distance range (only applied when TA is present)
+        if (dTa != null && (dTa < minDist || dTa > maxDist)) { skipDist++; continue; }
+        const est = _estimateByAzimuth(
+          bestCell.lat, bestCell.lon, bestCell.az,
+          cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0, ta);
+        samp.latitude  = est.lat;
+        samp.longitude = est.lon;
+      } else {
+        samp.latitude  = pos2.lat;
+        samp.longitude = pos2.lon;
+      }
+      samp._geo_synthetic = true;
+      pass1++;
+    }
+  }
+
+  // ── Pass 2: RNTI=0 / still unpositioned ──────────────────────────────────
+  for (const s of samples) {
+    if (s.latitude != null) continue;
+    const cell = cellDb[String(s.cell_id)];
+    if (!cell) continue;
+
+    // Filter 1: minimum RSRP
+    if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm) && s.rsrp_dbm < minRsrp) {
+      skipRsrp++;
+      continue;
+    }
+
+    const ta  = s.ta_us;
+    const dTa = (ta != null && isFinite(ta) && ta > 0) ? ta * 78.125 : null;
+    // Filter 2: TA distance range
+    if (dTa != null && (dTa < minDist || dTa > maxDist)) { skipDist++; continue; }
+
+    if (cell.az != null) {
+      const seed = (s.timestamp_ms || 0) ^ (s.cell_id || 0);
+      const est  = _estimateByAzimuth(cell.lat, cell.lon, cell.az, s.rsrp_dbm, 0, seed, ta);
+      s.latitude  = est.lat;
+      s.longitude = est.lon;
+    } else {
+      s.latitude  = cell.lat;
+      s.longitude = cell.lon;
+    }
+    s._geo_synthetic = true;
+    pass2++;
+  }
+
+  console.log(`[Planet-Loc] pass1=${pass1} pass2=${pass2} skipRsrp=${skipRsrp} skipDist=${skipDist}`);
+  return samples;
+}
+
+// Re-run geolocation on raw samples whenever method or parameters change.
+// rawSamples preserves the pre-localization state; GPS positions are kept.
+function reGeolocate() {
+  if (!state.rawSamples.length) { setStatus('No data to re-geolocate.'); return; }
+
+  const method  = document.querySelector('input[name=geomethod]:checked').value;
+  const hasDb   = Object.keys(state.cellDb).length > 0;
+
+  // Start from raw snapshot — strip synthetic positions, preserve GPS positions
+  state.samples = state.rawSamples.map(s => {
+    const c = { ...s };
+    if (c._geo_synthetic) { delete c.latitude; delete c.longitude; delete c._geo_synthetic; }
+    return c;
+  });
+
+  // Re-correlate GPS if any was loaded
+  if (state.gpsPts.length) {
+    state.samples = correlateGps(state.samples, state.gpsPts);
+  }
+
+  if (hasDb) {
+    if (method === 'planet') {
+      const opts = {
+        minRsrp: parseFloat(document.getElementById('geo-min-rsrp').value) ?? -110,
+        minDist: parseFloat(document.getElementById('geo-min-dist').value) ?? 0,
+        maxDist: parseFloat(document.getElementById('geo-max-dist').value) ?? 1500,
+      };
+      applyPlanetLocalization(state.samples, state.cellDb, opts);
+    } else {
+      applyUeLocalization(state.samples, state.cellDb);
+    }
+  }
+
+  state.samples.forEach(enrichSample);
+  state.filtered = applyFilters(state.samples);
+
+  const posCount = state.samples.filter(s => s.latitude != null).length;
+  const label    = method === 'planet' ? 'Planet-style' : 'RSRP Path-Loss';
+  setStatus(`Geolocation: ${label} · ${posCount.toLocaleString()} / ${state.samples.length.toLocaleString()} positioned`);
+
+  renderAll();
+  renderTimeline(state.filtered);
+  updateKpiPanel(computeKpis(state.filtered));
+  updatePerCellTable(computePerCell(state.filtered));
 }
 
 // ── Gzip decompression (browser DecompressionStream API) ─────────────────────
@@ -1978,7 +2169,7 @@ function correlateGps(samples, gpsPts) {
       if (sorted[mid].timestamp_ms < ts) lo=mid+1; else hi=mid-1;
     }
     if (Math.abs(nearest.timestamp_ms - ts) <= 500) {
-      return { ...s, latitude:nearest.latitude, longitude:nearest.longitude };
+      return { ...s, latitude:nearest.latitude, longitude:nearest.longitude, _geo_gps:true, _geo_synthetic:false };
     }
     return s;
   });
@@ -2702,6 +2893,8 @@ function loadData(newSamples, cellMeta=null) {
 
 function clearAll() {
   state.samples=[];
+  state.rawSamples=[];
+  state.gpsPts=[];
   state.cellMeta=[];
   state.cellDb={};
   state.filtered=[];
@@ -2927,6 +3120,7 @@ async function processFiles() {
       allGpsPts = allGpsPts.concat(gpsPts);
     }
     if (allGpsPts.length) {
+      state.gpsPts = [...state.gpsPts, ...allGpsPts];
       state.samples = correlateGps(state.samples, allGpsPts);
       state.samples.forEach(enrichSample);
       state.filtered = applyFilters(state.samples);
@@ -2935,6 +3129,10 @@ async function processFiles() {
       updateKpiPanel(computeKpis(state.filtered));
       msgs.push(`GPS: ${allGpsPts.length} pts correlated`);
     }
+
+    // Snapshot raw samples for re-geolocation (preserves positions at this point;
+    // synthetic positions are tagged _geo_synthetic; GPS positions tagged _geo_gps)
+    state.rawSamples = state.samples.map(s => ({ ...s }));
 
     // Reset staged state
     Object.keys(stagedFiles).forEach(k => {
@@ -2979,6 +3177,11 @@ document.getElementById('file-events').addEventListener('change', () => stageFil
 document.getElementById('file-gps').addEventListener('change', () => stageFile('file-gps','gps'));
 document.getElementById('file-meta').addEventListener('change', () => stageFile('file-meta','meta'));
 document.getElementById('btn-process').addEventListener('click', processFiles);
+
+document.querySelectorAll('input[name=geomethod]').forEach(r => r.addEventListener('change', e => {
+  document.getElementById('planet-geo-opts').style.display = e.target.value === 'planet' ? 'block' : 'none';
+}));
+document.getElementById('btn-regeolocate').addEventListener('click', reGeolocate);
 
 document.querySelectorAll('input[name=viz]').forEach(r => r.addEventListener('change', renderAll));
 document.getElementById('sel-metric').addEventListener('change', () => {
