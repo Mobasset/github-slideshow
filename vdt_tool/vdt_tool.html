@@ -951,6 +951,15 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
       <option value="max">Max (Best)</option>
     </select>
 
+    <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Raster cell size</label>
+    <select id="sel-raster-cellsize" style="margin-bottom:6px">
+      <option value="50">50 m (fine)</option>
+      <option value="100" selected>100 m (recommended)</option>
+      <option value="150">150 m (like Planet)</option>
+      <option value="200">200 m (coarse)</option>
+      <option value="300">300 m (regional)</option>
+    </select>
+
     <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Min samples per cell</label>
     <select id="sel-raster-min-n" style="margin-bottom:6px">
       <option value="1">1 (show all)</option>
@@ -997,6 +1006,9 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
 
     <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Technology</label>
     <select id="sel-tech" multiple style="height:50px;margin-bottom:6px"></select>
+
+    <label style="font-size:10px;color:#888;display:block;margin-bottom:3px">Event Type <span style="color:#e94560" title="INTERNAL_EVENT_UE_MOBILITY_EVAL has serving RSRP (less biased)">ⓘ</span></label>
+    <select id="sel-event-type" multiple style="height:60px;margin-bottom:6px"></select>
 
     <div class="sec-hdr">Export</div>
     <div class="export-grid">
@@ -1109,10 +1121,13 @@ function updateLegend(metric, stats) {
   const rows = bins.slice().reverse().map(b =>
     `<div class="legend-row"><div class="legend-dot" style="background:${b.color};border-radius:2px"></div>${b.label}</div>`
   ).join('');
+  const biasNote = stats && stats.hasNeighborRsrp
+    ? `<br><span style="color:#e94560;font-size:9px">⚠ Includes neighbour RSRP (biased weak).<br>Filter → Event Type → UE_MOBILITY_EVAL for serving RSRP.</span>`
+    : '';
   const statsHtml = stats
     ? `<div style="color:#aaa;font-size:9px;margin-top:5px;border-top:1px solid #2a2a4a;padding-top:4px">` +
       `P5/Median/P95<br>${stats.p5.toFixed(0)} / ${stats.med.toFixed(0)} / ${stats.p95.toFixed(0)} ${meta.unit}` +
-      `<br><span style="color:#e94560;font-size:9px">⚠ MR data: weak-signal biased</span></div>`
+      `<br>n=${stats.n}${biasNote}</div>`
     : '';
   document.getElementById('map-legend').innerHTML =
     `<div style="color:#fff;font-weight:bold;font-size:11px;margin-bottom:2px">${meta.label}</div>` +
@@ -2127,10 +2142,14 @@ function renderAll() {
   const metric = document.getElementById('sel-metric').value;
   // Compute P5/median/P95 of current metric for legend stats
   const metricVals = state.filtered.map(s=>s[metric]).filter(v=>v!=null&&isFinite(v)).sort((a,b)=>a-b);
+  const hasNeighborRsrp = metric === 'rsrp_dbm' &&
+    state.filtered.some(s => s.event_type === 'RRC_MEASUREMENT_REPORT');
   const legendStats = metricVals.length >= 3 ? {
     p5:  metricVals[Math.floor(metricVals.length * 0.05)],
     med: metricVals[Math.floor(metricVals.length * 0.50)],
     p95: metricVals[Math.floor(metricVals.length * 0.95)],
+    n:   metricVals.length,
+    hasNeighborRsrp,
   } : null;
   updateLegend(metric, legendStats);
   clearAllLayers();
@@ -2176,7 +2195,8 @@ function renderDots(samples) {
   const metric   = document.getElementById('sel-metric').value;
   const agg      = document.getElementById('sel-raster-agg').value;
   const bins     = METRIC_BINS[metric] || RSRP_BINS;
-  const gridDeg  = 0.00045;
+  const cellSizeM = parseInt(document.getElementById('sel-raster-cellsize').value) || 100;
+  const gridDeg  = cellSizeM / 111111;
   const grid = {};
   for (const s of samples) {
     const gr  = Math.round(s.latitude  / gridDeg) * gridDeg;
@@ -2226,7 +2246,8 @@ function renderRaster(samples) {
   const meta     = METRIC_META[metric] || METRIC_META.rsrp_dbm;
   const aggLabel = { median:'Median', average:'Avg', max:'Max' }[agg] || agg;
 
-  const gridDeg = 0.00045; // ≈50 m at equator
+  const cellSizeM = parseInt(document.getElementById('sel-raster-cellsize').value) || 100;
+  const gridDeg = cellSizeM / 111111;
   const half = gridDeg / 2;
   const grid = {};
   for (const s of samples) {
@@ -2570,6 +2591,7 @@ function applyFilters(samples, extra={}) {
   const cellSel     = [...document.getElementById('sel-cell-filter').selectedOptions].map(o=>String(o.value));
   const earfcnSel   = [...document.getElementById('sel-earfcn-filter').selectedOptions].map(o=>parseInt(o.value));
   const techSel     = [...document.getElementById('sel-tech').selectedOptions].map(o=>o.value);
+  const evTypeSel   = [...document.getElementById('sel-event-type').selectedOptions].map(o=>o.value);
   const timeRange   = extra.timeRange || null;
 
   return samples.filter(s => {
@@ -2577,6 +2599,7 @@ function applyFilters(samples, extra={}) {
     if (cellSel.length  && !cellSel.includes(String(s.cell_id))) return false;
     if (earfcnSel.length && !earfcnSel.includes(s.earfcn||0)) return false;
     if (techSel.length  && !techSel.includes(s.tech||'LTE')) return false;
+    if (evTypeSel.length && !evTypeSel.includes(s.event_type||'')) return false;
     if (timeRange && (s.timestamp_ms < timeRange[0] || s.timestamp_ms > timeRange[1])) return false;
     return true;
   });
@@ -2608,6 +2631,29 @@ function populateTechFilter(samples) {
   sel.innerHTML = techs.map(t=>`<option value="${t}">${t}</option>`).join('');
 }
 
+// Event type labels: show short label and note which have serving vs neighbour RSRP
+const _EVENT_TYPE_LABELS = {
+  'RRC_MEASUREMENT_REPORT':            'RRC_MEAS_REPORT (neighbour RSRP)',
+  'INTERNAL_EVENT_UE_MOBILITY_EVAL':   'UE_MOBILITY_EVAL (serving RSRP ✓)',
+  'INTERNAL_PER_RADIO_UE_MEASUREMENT': 'PER_RADIO_UE_MEAS',
+  'INTERNAL_HANDOVER_SUCCESS':         'HO_SUCCESS',
+  'INTERNAL_HANDOVER_FAILURE':         'HO_FAILURE',
+  'INTERNAL_HANDOVER_ATTEMPT':         'HO_ATTEMPT',
+  'A3_TRIGGER':                        'A3_TRIGGER',
+  'A5_TRIGGER':                        'A5_TRIGGER',
+  'RRC_RLF':                           'RLF',
+  'NR_SCG_FAILURE':                    'NR_SCG_FAILURE',
+};
+
+function populateEventTypeFilter(samples) {
+  const sel = document.getElementById('sel-event-type');
+  const types = [...new Set(samples.map(s=>s.event_type).filter(Boolean))].sort();
+  sel.innerHTML = types.map(t => {
+    const label = _EVENT_TYPE_LABELS[t] || t;
+    return `<option value="${t}">${label}</option>`;
+  }).join('');
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LOAD DATA PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2624,6 +2670,7 @@ function loadData(newSamples, cellMeta=null) {
   populateCellFilter(state.samples);
   populateEarfcnFilter(state.samples);
   populateTechFilter(state.samples);
+  populateEventTypeFilter(state.samples);
   updateKpiPanel(computeKpis(state.filtered));
   renderAll();
   renderTimeline(state.filtered);
@@ -2644,6 +2691,7 @@ function clearAll() {
   document.getElementById('sel-cell-filter').innerHTML='';
   document.getElementById('sel-earfcn-filter').innerHTML='';
   document.getElementById('sel-tech').innerHTML='';
+  document.getElementById('sel-event-type').innerHTML='';
   Plotly.purge(document.getElementById('timeline-chart'));
   setStatus('All data cleared.');
 }
@@ -2917,6 +2965,7 @@ document.getElementById('sel-metric').addEventListener('change', () => {
   renderAll();
 });
 document.getElementById('sel-raster-agg').addEventListener('change', renderAll);
+document.getElementById('sel-raster-cellsize').addEventListener('change', renderAll);
 document.getElementById('sel-raster-min-n').addEventListener('change', renderAll);
 document.getElementById('chk-track').addEventListener('change', renderAll);
 document.getElementById('chk-sites').addEventListener('change', renderAll);
@@ -2932,6 +2981,7 @@ document.getElementById('rsrp-thresh').addEventListener('input', e => {
 document.getElementById('sel-cell-filter').addEventListener('change', refreshFilters);
 document.getElementById('sel-earfcn-filter').addEventListener('change', refreshFilters);
 document.getElementById('sel-tech').addEventListener('change', refreshFilters);
+document.getElementById('sel-event-type').addEventListener('change', refreshFilters);
 
 document.getElementById('btn-csv').addEventListener('click', exportCsv);
 document.getElementById('btn-geojson').addEventListener('click', exportGeoJson);
