@@ -1640,8 +1640,11 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
           Math.abs(pos2.lat - bestCell.lat) < 1e-4 &&
           Math.abs(pos2.lon - bestCell.lon) < 1e-4;
         if (coLocated && bestCell.az != null) {
+          // Use the sample's own serving cell for azimuth — not the best-RSRP cell in
+          // the window, which may be a different co-located sector pointing another way.
+          const servCell = cellDb[String(samp.cell_id)] || bestCell;
           const est = _estimateByAzimuth(
-            bestCell.lat, bestCell.lon, bestCell.az,
+            servCell.lat, servCell.lon, servCell.az,
             cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0,
             samp.ta_us);
           samp.latitude  = est.lat;
@@ -1919,8 +1922,10 @@ function applyPlanetLocalization(samples, cellDb, opts = {}) {
         const dTa  = (ta != null && isFinite(ta) && ta > 0) ? ta * 78.125 : null;
         // Filter 2: TA distance range (only applied when TA is present)
         if (dTa != null && (dTa < minDist || dTa > maxDist)) { skipDist++; continue; }
+        // Use the sample's own serving cell for azimuth direction.
+        const servCell = cellDb[String(samp.cell_id)] || bestCell;
         const est = _estimateByAzimuth(
-          bestCell.lat, bestCell.lon, bestCell.az,
+          servCell.lat, servCell.lon, servCell.az,
           cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0, ta);
         samp.latitude  = est.lat;
         samp.longitude = est.lon;
