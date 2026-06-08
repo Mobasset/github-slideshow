@@ -845,7 +845,7 @@ select option{background:#16213e}
 #map{width:100%;height:100%}
 
 /* ── Legend ── */
-#map-legend{position:absolute;bottom:30px;right:10px;background:rgba(22,33,62,.9);border:1px solid #2a2a4a;border-radius:5px;padding:8px 10px;z-index:999;font-size:10px;min-width:110px}
+#map-legend{position:absolute;bottom:30px;right:10px;background:rgba(22,33,62,.9);border:1px solid #2a2a4a;border-radius:5px;padding:8px 10px;z-index:999;font-size:10px;min-width:175px}
 .legend-row{display:flex;align-items:center;gap:6px;margin-bottom:3px}
 .legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 
@@ -1147,17 +1147,26 @@ const METRIC_META = {
 function updateLegend(metric, stats) {
   const bins = METRIC_BINS[metric] || RSRP_BINS;
   const meta = METRIC_META[metric] || METRIC_META.rsrp_dbm;
-  const rows = bins.slice().reverse().map(b =>
-    `<div class="legend-row"><div class="legend-dot" style="background:${b.color};border-radius:2px"></div>${b.label}</div>`
-  ).join('');
+  const total = stats?.n ?? 0;
+  const rows = bins.slice().reverse().map(b => {
+    const cnt = stats?.binCounts?.[b.label] ?? null;
+    const pct = (cnt != null && total > 0) ? (cnt / total * 100).toFixed(0) : null;
+    const countStr = cnt != null
+      ? `<span style="color:#aaa;font-size:9px;margin-left:auto;white-space:nowrap">${cnt.toLocaleString()} (${pct}%)</span>`
+      : '';
+    return `<div class="legend-row" style="justify-content:space-between">` +
+      `<div style="display:flex;align-items:center;gap:6px">` +
+      `<div class="legend-dot" style="background:${b.color};border-radius:2px"></div>${b.label}</div>` +
+      countStr + `</div>`;
+  }).join('');
   const biasNote = stats && stats.hasNeighborRsrp
     ? `<br><span style="color:#e94560;font-size:9px">⚠ Includes neighbour RSRP (biased weak).<br>Filter → Event Type → UE_MOBILITY_EVAL for serving RSRP.</span>`
     : '';
-  const statsHtml = stats
+  const statsHtml = (stats && stats.p5 != null)
     ? `<div style="color:#aaa;font-size:9px;margin-top:5px;border-top:1px solid #2a2a4a;padding-top:4px">` +
       `P5/Median/P95<br>${stats.p5.toFixed(0)} / ${stats.med.toFixed(0)} / ${stats.p95.toFixed(0)} ${meta.unit}` +
       `<br>n=${stats.n}${biasNote}</div>`
-    : '';
+    : (stats ? `<div style="color:#aaa;font-size:9px;margin-top:5px;border-top:1px solid #2a2a4a;padding-top:4px">n=${stats.n}${biasNote}</div>` : '');
   document.getElementById('map-legend').innerHTML =
     `<div style="color:#fff;font-weight:bold;font-size:11px;margin-bottom:2px">${meta.label}</div>` +
     `<div style="color:#ccc;font-size:10px;margin-bottom:6px">Unit: ${meta.unit}</div>` + rows + statsHtml;
@@ -2629,16 +2638,25 @@ function renderAll() {
     events:  document.getElementById('chk-events').checked,
   };
   const metric = document.getElementById('sel-metric').value;
-  // Compute P5/median/P95 of current metric for legend stats
+  // Compute P5/median/P95 and per-bin counts of current metric
   const metricVals = state.filtered.map(s=>s[metric]).filter(v=>v!=null&&isFinite(v)).sort((a,b)=>a-b);
   const hasNeighborRsrp = metric === 'rsrp_dbm' &&
     state.filtered.some(s => s.event_type === 'RRC_MEASUREMENT_REPORT');
-  const legendStats = metricVals.length >= 3 ? {
-    p5:  metricVals[Math.floor(metricVals.length * 0.05)],
-    med: metricVals[Math.floor(metricVals.length * 0.50)],
-    p95: metricVals[Math.floor(metricVals.length * 0.95)],
+  const mBins = METRIC_BINS[metric] || RSRP_BINS;
+  const binCounts = {};
+  mBins.forEach(b => { binCounts[b.label] = 0; });
+  for (const v of metricVals) {
+    for (const b of mBins) {
+      if (v >= b.min && v < b.max) { binCounts[b.label]++; break; }
+    }
+  }
+  const legendStats = metricVals.length >= 1 ? {
+    p5:  metricVals.length >= 3 ? metricVals[Math.floor(metricVals.length * 0.05)] : null,
+    med: metricVals.length >= 3 ? metricVals[Math.floor(metricVals.length * 0.50)] : null,
+    p95: metricVals.length >= 3 ? metricVals[Math.floor(metricVals.length * 0.95)] : null,
     n:   metricVals.length,
     hasNeighborRsrp,
+    binCounts,
   } : null;
   updateLegend(metric, legendStats);
   clearAllLayers();
