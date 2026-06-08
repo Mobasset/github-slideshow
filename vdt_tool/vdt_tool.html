@@ -987,6 +987,13 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
         <input type="number" id="geo-max-dist" value="2500" step="100" min="100" max="5000" placeholder="2500"
                style="width:70px;background:#1a1a3e;border:1px solid #3a3a6e;color:#e0e0e0;padding:2px 4px;border-radius:3px">
       </div>
+      <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">
+        Sector spread (±°) <span id="geo-spread-val" style="color:#e94560;font-weight:bold">30</span>°
+        <span style="color:#555;font-size:9px"> — used when single sector visible</span>
+      </label>
+      <input type="range" id="geo-beam-spread" value="30" min="5" max="60" step="5"
+             style="width:100%;accent-color:#e94560;margin-bottom:6px"
+             oninput="document.getElementById('geo-spread-val').textContent=this.value">
       <div style="font-size:9px;color:#666;margin-bottom:5px">TA filter only applies when TA is present in data. Without TA, RSRP path-loss is used as fallback.</div>
       <button id="btn-regeolocate" style="width:100%;padding:5px;background:#1a1a3e;border:1px solid #e94560;color:#e94560;border-radius:4px;cursor:pointer;font-size:10px;font-weight:bold">↺ Apply Geolocation</button>
     </div>
@@ -1554,8 +1561,8 @@ function buildCellDb(cellMeta) {
 //   formula: 50 × 10^((-rsrp − 60) / 35), giving ~180 m at -80 dBm, ~1340 m at -110 dBm.
 // Direction: when cellRsrp contains ≥2 distinct sector azimuths, the RSRP-weighted
 //   circular mean gives the bearing (Planet-style triangulation for co-located sectors).
-//   Otherwise: serving-cell azimuth ± 30° deterministic spread (RNTI or seed hash).
-function _estimateByAzimuth(lat, lon, az_deg, rsrp_dbm, rnti, seed, ta=null, cellRsrp=null, cellDb=null) {
+//   Otherwise: serving-cell azimuth ± beamSpread° deterministic spread (RNTI or seed hash).
+function _estimateByAzimuth(lat, lon, az_deg, rsrp_dbm, rnti, seed, ta=null, cellRsrp=null, cellDb=null, beamSpread=30) {
   // Distance
   let d;
   if (ta != null && isFinite(ta) && ta >= 1 && ta <= 1282) {
@@ -1595,10 +1602,10 @@ function _estimateByAzimuth(lat, lon, az_deg, rsrp_dbm, rnti, seed, ta=null, cel
     }
   }
 
-  // Single sector or no multi-sector data: ±30° deterministic spread
+  // Single sector or no multi-sector data: ±beamSpread° deterministic spread
   const h = rnti > 0 ? rnti : Math.abs((seed * 2654435761) >>> 0);
   const frac = ((h * 1664525 + 1013904223) >>> 0) / 4294967296;
-  angle_rad = (az_deg + (frac - 0.5) * 60) * Math.PI / 180;
+  angle_rad = (az_deg + (frac - 0.5) * beamSpread * 2) * Math.PI / 180;
   return {
     lat: lat + (d * Math.cos(angle_rad)) / 111111,
     lon: lon + (d * Math.sin(angle_rad)) / (111111 * cosLat),
@@ -1619,7 +1626,7 @@ function _weightedCentroid(cellRsrp, cellDb) {
   return { lat: latAcc / wAcc, lon: lonAcc / wAcc };
 }
 
-function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
+function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS, beamSpread = 30) {
   const dbKeys = Object.keys(cellDb);
   const sampleCids = [...new Set(samples.map(s => String(s.cell_id)))];
   const matched = sampleCids.filter(c => cellDb[c]);
@@ -1681,7 +1688,7 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
           const est = _estimateByAzimuth(
             servCell.lat, servCell.lon, servCell.az,
             cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0,
-            samp.ta_us, cellRsrp, cellDb);
+            samp.ta_us, cellRsrp, cellDb, beamSpread);
           samp.latitude  = est.lat;
           samp.longitude = est.lon;
         } else {
@@ -1702,7 +1709,7 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS) {
     if (cell.az != null) {
       const seed = (s.timestamp_ms || 0) ^ (s.cell_id || 0);
       const est = _estimateByAzimuth(cell.lat, cell.lon, cell.az,
-        s.rsrp_dbm, 0, seed, s.ta_us);
+        s.rsrp_dbm, 0, seed, s.ta_us, null, null, beamSpread);
       s.latitude  = est.lat;
       s.longitude = est.lon;
     } else {
@@ -1897,9 +1904,10 @@ function enrichSamplesWithTa(samples, taSources) {
 // VDT method) so the filter still produces a result.
 
 function applyPlanetLocalization(samples, cellDb, opts = {}) {
-  const minRsrp = opts.minRsrp ?? -110;
-  const minDist = opts.minDist ?? 0;
-  const maxDist = opts.maxDist ?? 2500;
+  const minRsrp    = opts.minRsrp    ?? -110;
+  const minDist    = opts.minDist    ?? 0;
+  const maxDist    = opts.maxDist    ?? 2500;
+  const beamSpread = opts.beamSpread ?? 30;
 
   let pass1 = 0, pass2 = 0, skipRsrp = 0, skipDist = 0;
 
@@ -1961,7 +1969,7 @@ function applyPlanetLocalization(samples, cellDb, opts = {}) {
         const servCell = cellDb[String(samp.cell_id)] || bestCell;
         const est = _estimateByAzimuth(
           servCell.lat, servCell.lon, servCell.az,
-          cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0, ta, cellRsrp, cellDb);
+          cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0, ta, cellRsrp, cellDb, beamSpread);
         samp.latitude  = est.lat;
         samp.longitude = est.lon;
       } else {
@@ -1992,7 +2000,7 @@ function applyPlanetLocalization(samples, cellDb, opts = {}) {
 
     if (cell.az != null) {
       const seed = (s.timestamp_ms || 0) ^ (s.cell_id || 0);
-      const est  = _estimateByAzimuth(cell.lat, cell.lon, cell.az, s.rsrp_dbm, 0, seed, ta);
+      const est  = _estimateByAzimuth(cell.lat, cell.lon, cell.az, s.rsrp_dbm, 0, seed, ta, null, null, beamSpread);
       s.latitude  = est.lat;
       s.longitude = est.lon;
     } else {
@@ -2031,15 +2039,17 @@ function reGeolocate() {
   }
 
   if (hasDb) {
+    const beamSpread = parseFloat(document.getElementById('geo-beam-spread')?.value) || 30;
     if (method === 'planet') {
       const opts = {
-        minRsrp: parseFloat(document.getElementById('geo-min-rsrp').value) ?? -110,
-        minDist: parseFloat(document.getElementById('geo-min-dist').value) ?? 0,
-        maxDist: parseFloat(document.getElementById('geo-max-dist').value) ?? 2500,
+        minRsrp:    parseFloat(document.getElementById('geo-min-rsrp').value) ?? -110,
+        minDist:    parseFloat(document.getElementById('geo-min-dist').value) ?? 0,
+        maxDist:    parseFloat(document.getElementById('geo-max-dist').value) ?? 2500,
+        beamSpread,
       };
       applyPlanetLocalization(state.samples, state.cellDb, opts);
     } else {
-      applyUeLocalization(state.samples, state.cellDb);
+      applyUeLocalization(state.samples, state.cellDb, _UE_WINDOW_MS, beamSpread);
     }
   }
 
