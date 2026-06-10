@@ -845,7 +845,7 @@ select option{background:#16213e}
 #map{width:100%;height:100%}
 
 /* ── Legend ── */
-#map-legend{position:absolute;bottom:30px;right:10px;background:rgba(22,33,62,.9);border:1px solid #2a2a4a;border-radius:5px;padding:8px 10px;z-index:999;font-size:10px;min-width:175px}
+#map-legend{position:absolute;bottom:30px;right:10px;background:rgba(22,33,62,.9);border:1px solid #2a2a4a;border-radius:5px;padding:8px 10px;z-index:999;font-size:10px;min-width:110px}
 .legend-row{display:flex;align-items:center;gap:6px;margin-bottom:3px}
 .legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 
@@ -1000,7 +1000,8 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
 
     <div class="sec-hdr">Metric (Raster &amp; Heatmap)</div>
     <select id="sel-metric">
-      <option value="rsrp_dbm">RSRP (dBm)</option>
+      <option value="rsrp_dbm">RSRP – Serving (dBm)</option>
+      <option value="meas_rsrp_dbm">RSRP – All Events (dBm)</option>
       <option value="rsrq_db">RSRQ (dB)</option>
       <option value="sinr_db">SINR (dB)</option>
       <option value="throughput_dl_mbps">DL Throughput (Mbps)</option>
@@ -1110,7 +1111,8 @@ const RSRP_BINS = [
 ];
 
 const METRIC_BINS = {
-  rsrp_dbm: RSRP_BINS,
+  rsrp_dbm:      RSRP_BINS,
+  meas_rsrp_dbm: RSRP_BINS,
   rsrq_db: [
     { min:-6,        max:Infinity, label:'≥ −6',         color:'#00b050' },
     { min:-9,        max:-6,       label:'−9 to −6',     color:'#92d050' },
@@ -1138,17 +1140,19 @@ const METRIC_BINS = {
 };
 
 const METRIC_META = {
-  rsrp_dbm:           { label:'Raster Serving RSRP', unit:'dBm' },
-  rsrq_db:            { label:'Raster RSRQ',         unit:'dB'  },
-  sinr_db:            { label:'Raster SINR',         unit:'dB'  },
-  throughput_dl_mbps: { label:'Raster DL Throughput',unit:'Mbps'},
+  rsrp_dbm:           { label:'Serving RSRP',              unit:'dBm',  note: null },
+  meas_rsrp_dbm:      { label:'RSRP – Meas. Report (All)', unit:'dBm',
+    note:'⚠ RRC_MEASUREMENT_REPORT RSRP — may include triggered/neighbor cell values (biased weak vs serving RSRP).' },
+  rsrq_db:            { label:'Raster RSRQ',               unit:'dB',   note: null },
+  sinr_db:            { label:'Raster SINR',               unit:'dB',   note: null },
+  throughput_dl_mbps: { label:'Raster DL Throughput',      unit:'Mbps', note: null },
 };
 
 function updateLegend(metric, stats) {
-  const bins = METRIC_BINS[metric] || RSRP_BINS;
-  const meta = METRIC_META[metric] || METRIC_META.rsrp_dbm;
+  const bins  = METRIC_BINS[metric] || RSRP_BINS;
+  const meta  = METRIC_META[metric] || METRIC_META.rsrp_dbm;
   const total = stats?.n ?? 0;
-  const rows = bins.slice().reverse().map(b => {
+  const rows  = bins.slice().reverse().map(b => {
     const cnt = stats?.binCounts?.[b.label] ?? null;
     const pct = (cnt != null && total > 0) ? (cnt / total * 100).toFixed(0) : null;
     const countStr = cnt != null
@@ -1159,14 +1163,13 @@ function updateLegend(metric, stats) {
       `<div class="legend-dot" style="background:${b.color};border-radius:2px"></div>${b.label}</div>` +
       countStr + `</div>`;
   }).join('');
-  const biasNote = stats && stats.hasNeighborRsrp
-    ? `<br><span style="color:#e94560;font-size:9px">⚠ Includes neighbour RSRP (biased weak).<br>Filter → Event Type → UE_MOBILITY_EVAL for serving RSRP.</span>`
-    : '';
+  const noteHtml = meta.note
+    ? `<br><span style="color:#e94560;font-size:9px">${meta.note}</span>` : '';
   const statsHtml = (stats && stats.p5 != null)
     ? `<div style="color:#aaa;font-size:9px;margin-top:5px;border-top:1px solid #2a2a4a;padding-top:4px">` +
       `P5/Median/P95<br>${stats.p5.toFixed(0)} / ${stats.med.toFixed(0)} / ${stats.p95.toFixed(0)} ${meta.unit}` +
-      `<br>n=${stats.n}${biasNote}</div>`
-    : (stats ? `<div style="color:#aaa;font-size:9px;margin-top:5px;border-top:1px solid #2a2a4a;padding-top:4px">n=${stats.n}${biasNote}</div>` : '');
+      `<br>n=${total}${noteHtml}</div>`
+    : (stats ? `<div style="color:#aaa;font-size:9px;margin-top:5px;border-top:1px solid #2a2a4a;padding-top:4px">n=${total}${noteHtml}</div>` : '');
   document.getElementById('map-legend').innerHTML =
     `<div style="color:#fff;font-weight:bold;font-size:11px;margin-bottom:2px">${meta.label}</div>` +
     `<div style="color:#ccc;font-size:10px;margin-bottom:6px">Unit: ${meta.unit}</div>` + rows + statsHtml;
@@ -1671,7 +1674,7 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS, beamSpre
         const samp = samples[indices[k]];
         const cid = String(samp.cell_id);
         if (!cellDb[cid]) continue;
-        const rsrp = samp.rsrp_dbm;
+        const rsrp = samp.rsrp_dbm ?? samp.meas_rsrp_dbm;
         if (rsrp != null && isFinite(rsrp)) {
           if (cellRsrp[cid] == null || rsrp > cellRsrp[cid])
             cellRsrp[cid] = rsrp;
@@ -1718,7 +1721,7 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS, beamSpre
     if (cell.az != null) {
       const seed = (s.timestamp_ms || 0) ^ (s.cell_id || 0);
       const est = _estimateByAzimuth(cell.lat, cell.lon, cell.az,
-        s.rsrp_dbm, 0, seed, s.ta_us, null, null, beamSpread);
+        s.rsrp_dbm ?? s.meas_rsrp_dbm, 0, seed, s.ta_us, null, null, beamSpread);
       s.latitude  = est.lat;
       s.longitude = est.lon;
     } else {
@@ -1902,6 +1905,57 @@ function enrichSamplesWithTa(samples, taSources) {
   return enriched;
 }
 
+// Propagate 0x49 serving RSRP to nearby 0x0b measurement-report records.
+// Prefers RNTI match; falls back to same-cell within ±5 s.
+function enrichSamplesWithServingRsrp(samples) {
+  // Collect serving-RSRP sources: 0x49 events that have rsrp_dbm but no meas_rsrp_dbm
+  const sources = samples.filter(s =>
+    s.event_type === 'INTERNAL_EVENT_UE_MOBILITY_EVAL' &&
+    s.rsrp_dbm != null && isFinite(s.rsrp_dbm)
+  );
+  if (!sources.length) return 0;
+
+  // Build per-cell sorted array for binary search
+  const byCell = {};
+  for (const s of sources) {
+    (byCell[s.cell_id] || (byCell[s.cell_id] = [])).push(s);
+  }
+  for (const arr of Object.values(byCell)) arr.sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+
+  const WINDOW = 5000; // ±5 s
+  let enriched = 0;
+
+  for (const s of samples) {
+    // Only enrich 0x0b records that still have no serving RSRP
+    if (s.event_type !== 'RRC_MEASUREMENT_REPORT') continue;
+    if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm)) continue;
+
+    const arr = byCell[s.cell_id];
+    if (!arr) continue;
+
+    // Binary-search closest 0x49 event within ±WINDOW ms
+    let lo = 0, hi = arr.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid].timestamp_ms < s.timestamp_ms) lo = mid + 1; else hi = mid;
+    }
+
+    let best = null, bestDt = WINDOW;
+    for (const i of [lo - 1, lo, lo + 1]) {
+      if (i < 0 || i >= arr.length) continue;
+      const cand = arr[i];
+      const dt = Math.abs(cand.timestamp_ms - s.timestamp_ms);
+      if (dt > WINDOW) continue;
+      // Prefer RNTI match, then closest time
+      const rntiMatch = s.rnti && cand.rnti && s.rnti === cand.rnti;
+      if (rntiMatch && dt < bestDt + 500) { bestDt = dt; best = cand; }
+      else if (!rntiMatch && dt < bestDt) { bestDt = dt; best = cand; }
+    }
+    if (best) { s.rsrp_dbm = best.rsrp_dbm; enriched++; }
+  }
+  return enriched;
+}
+
 // ── Planet-style geolocation ──────────────────────────────────────────────────
 // Applies the same 5-filter pipeline Planet uses for call-trace geolocation:
 //   1. Serving cell RSRP filter  — exclude below minRsrp (weak / no-signal areas)
@@ -1954,7 +2008,7 @@ function applyPlanetLocalization(samples, cellDb, opts = {}) {
         const s2  = samples[indices[k]];
         const cid = String(s2.cell_id);
         if (!cellDb[cid]) continue;
-        const r = s2.rsrp_dbm;
+        const r = s2.rsrp_dbm ?? s2.meas_rsrp_dbm;
         if (r != null && isFinite(r) && (cellRsrp[cid] == null || r > cellRsrp[cid]))
           cellRsrp[cid] = r;
       }
@@ -2202,7 +2256,7 @@ function parseEricssonCTraceBinary(bytes, filename) {
         } else {
           const base = {
             timestamp_ms: ts, cell_id: cellId, rnti: 0,
-            rsrp_dbm: null, rsrq_db: null, sinr_db: null, ta_us: null,
+            rsrp_dbm: null, meas_rsrp_dbm: null, rsrq_db: null, sinr_db: null, ta_us: null,
             ho_attempt: 0, ho_success: 0, ho_failure: 0,
             rlf_flag: 0, scg_failure: 0, a3_trigger: 0, a5_trigger: 0,
             event_cause: '', source_file: filename,
@@ -2213,7 +2267,7 @@ function parseEricssonCTraceBinary(bytes, filename) {
             const word = dv.getUint16(pOff + 42, false);
             const rsrpIe = (word >> 8) & 0x7F;
             const rsrqIe = (word >> 2) & 0x3F;
-            if (rsrpIe > 0) base.rsrp_dbm = rsrpIe - 140;
+            if (rsrpIe > 0) base.meas_rsrp_dbm = rsrpIe - 140;
             if (rsrqIe > 0) base.rsrq_db  = rsrqIe / 2 - 19.5;
             if (pLen >= 53) base.rnti = dv.getUint16(pOff + 51, false);
             records.push({ ...base, event_type: 'RRC_MEASUREMENT_REPORT' });
@@ -2304,14 +2358,14 @@ function parseEricssonCTrace(text, filename) {
     }
     const rowStr = kvCols.join(',');
 
-    let rsrp_dbm = NaN, rsrq_db = NaN, sinr_db = NaN, cqi = NaN, ta_us = NaN;
+    let rsrp_dbm = NaN, meas_rsrp_dbm = NaN, rsrq_db = NaN, sinr_db = NaN, cqi = NaN, ta_us = NaN;
     let event_type = '', event_cause = '';
     let ho_attempt=0, ho_success=0, ho_failure=0, rlf_flag=0;
     let scg_failure=0, a3_trigger=0, a5_trigger=0;
 
     if (eventDesc === 'RRC_MEASUREMENT_REPORT') {
       const rm = rowStr.match(/rsrpResult,(\d+)/);
-      if (rm) rsrp_dbm = +rm[1] - 140;
+      if (rm) meas_rsrp_dbm = +rm[1] - 140;
       const rqm = rowStr.match(/rsrqResult,(\d+)/);
       if (rqm) rsrq_db = +rqm[1] / 2 - 19.5;
 
@@ -2358,14 +2412,14 @@ function parseEricssonCTrace(text, filename) {
     }
 
     // Skip records with nothing useful
-    if (isNaN(rsrp_dbm) && isNaN(cqi) && isNaN(sinr_db) &&
+    if (isNaN(rsrp_dbm) && isNaN(meas_rsrp_dbm) && isNaN(cqi) && isNaN(sinr_db) &&
         !ho_attempt && !ho_success && !ho_failure && !rlf_flag &&
         !scg_failure && !a3_trigger && !a5_trigger) continue;
 
     records.push({
       timestamp_ms: ts, cell_id: cellId, rnti,
       pci: 0, earfcn: 0,
-      rsrp_dbm, rsrq_db, sinr_db, cqi,
+      rsrp_dbm, meas_rsrp_dbm, rsrq_db, sinr_db, cqi,
       ta_us, throughput_dl_mbps: NaN, throughput_ul_mbps: NaN,
       ho_attempt, ho_success, ho_failure, rlf_flag, rab_setup: 0,
       scg_failure, a3_trigger, a5_trigger,
@@ -2638,24 +2692,20 @@ function renderAll() {
     events:  document.getElementById('chk-events').checked,
   };
   const metric = document.getElementById('sel-metric').value;
-  // Compute P5/median/P95 and per-bin counts of current metric
+  // Compute P5/median/P95 of current metric for legend stats
   const metricVals = state.filtered.map(s=>s[metric]).filter(v=>v!=null&&isFinite(v)).sort((a,b)=>a-b);
-  const hasNeighborRsrp = metric === 'rsrp_dbm' &&
-    state.filtered.some(s => s.event_type === 'RRC_MEASUREMENT_REPORT');
+  // Per-bin counts for legend
   const mBins = METRIC_BINS[metric] || RSRP_BINS;
   const binCounts = {};
   mBins.forEach(b => { binCounts[b.label] = 0; });
   for (const v of metricVals) {
-    for (const b of mBins) {
-      if (v >= b.min && v < b.max) { binCounts[b.label]++; break; }
-    }
+    for (const b of mBins) { if (v >= b.min && v < b.max) { binCounts[b.label]++; break; } }
   }
   const legendStats = metricVals.length >= 1 ? {
     p5:  metricVals.length >= 3 ? metricVals[Math.floor(metricVals.length * 0.05)] : null,
     med: metricVals.length >= 3 ? metricVals[Math.floor(metricVals.length * 0.50)] : null,
     p95: metricVals.length >= 3 ? metricVals[Math.floor(metricVals.length * 0.95)] : null,
     n:   metricVals.length,
-    hasNeighborRsrp,
     binCounts,
   } : null;
   updateLegend(metric, legendStats);
@@ -2797,7 +2847,7 @@ function renderRaster(samples) {
 function _buildHeatGradient(metric) {
   // Build leaflet-heat gradient matching the metric's bin colors (worst→best = 0→1).
   const bins   = METRIC_BINS[metric] || RSRP_BINS;
-  const ranges = { rsrp_dbm:[-140,-40], rsrq_db:[-19.5,0], sinr_db:[-23,40], throughput_dl_mbps:[0,150] };
+  const ranges = { rsrp_dbm:[-140,-40], meas_rsrp_dbm:[-140,-40], rsrq_db:[-19.5,0], sinr_db:[-23,40], throughput_dl_mbps:[0,150] };
   const [vmin, vmax] = ranges[metric] || [-140, -40];
   const span   = vmax - vmin || 1;
   const grad   = {};
@@ -2813,7 +2863,7 @@ function _buildHeatGradient(metric) {
 
 function renderHeatmap(samples) {
   const metric = document.getElementById('sel-metric').value;
-  const ranges = { rsrp_dbm:[-140,-40], rsrq_db:[-19.5,0], sinr_db:[-23,40], throughput_dl_mbps:[0,150] };
+  const ranges = { rsrp_dbm:[-140,-40], meas_rsrp_dbm:[-140,-40], rsrq_db:[-19.5,0], sinr_db:[-23,40], throughput_dl_mbps:[0,150] };
   const [vmin, vmax] = ranges[metric] || [-140, -40];
   const span = vmax - vmin || 1;
   let pts = samples.map(s => {
@@ -2912,8 +2962,13 @@ function renderSiteMarkers() {
 }
 
 function buildTooltip(s) {
+  const rsrpLine = s.rsrp_dbm != null && isFinite(s.rsrp_dbm)
+    ? `RSRP (srv): <b>${fmt(s.rsrp_dbm)} dBm</b>`
+    : (s.meas_rsrp_dbm != null && isFinite(s.meas_rsrp_dbm)
+        ? `RSRP (meas): <b>${fmt(s.meas_rsrp_dbm)} dBm</b>`
+        : `RSRP: —`);
   return `<b>${new Date(s.timestamp_ms).toISOString().slice(11,19)} UTC</b><br>` +
-    `RSRP: <b>${fmt(s.rsrp_dbm)} dBm</b> | RSRQ: ${fmt(s.rsrq_db)} dB<br>` +
+    `${rsrpLine} | RSRQ: ${fmt(s.rsrq_db)} dB<br>` +
     `SINR: ${fmt(s.sinr_db)} dB | CQI: ${s.cqi??'—'}<br>` +
     `Cell: ${s.cell_id} | PCI: ${s.pci}<br>` +
     (s.event_type ? `Event: <b>${s.event_type.replace('INTERNAL_','')}</b>` : '');
@@ -3388,6 +3443,10 @@ async function processFiles() {
     const allCtrParsed = ctrBatches.flatMap(b => b.parsed);
     const taEnriched = enrichSamplesWithTa(allCtrParsed, state.taSources);
     if (taEnriched > 0) msgs.push(`TA enriched: ${taEnriched.toLocaleString()} measurement events`);
+
+    // Propagate 0x49 serving RSRP to 0x0b records that lack a serving RSRP value
+    const rsrpEnriched = enrichSamplesWithServingRsrp(allCtrParsed);
+    if (rsrpEnriched > 0) msgs.push(`Serving RSRP enriched: ${rsrpEnriched.toLocaleString()} measurement-report events`);
 
     // Localize and stage each file's records
     for (const { parsed, name } of ctrBatches) {
