@@ -845,7 +845,7 @@ select option{background:#16213e}
 #map{width:100%;height:100%}
 
 /* ── Legend ── */
-#map-legend{position:absolute;bottom:30px;right:10px;background:rgba(22,33,62,.9);border:1px solid #2a2a4a;border-radius:5px;padding:8px 10px;z-index:999;font-size:10px;min-width:110px}
+#map-legend{position:absolute;bottom:30px;right:10px;background:rgba(22,33,62,.9);border:1px solid #2a2a4a;border-radius:5px;padding:8px 10px;z-index:999;font-size:10px;min-width:195px}
 .legend-row{display:flex;align-items:center;gap:6px;margin-bottom:3px}
 .legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 
@@ -1142,7 +1142,7 @@ const METRIC_BINS = {
 const METRIC_META = {
   rsrp_dbm:           { label:'Serving RSRP',              unit:'dBm',  note: null },
   meas_rsrp_dbm:      { label:'RSRP – Meas. Report (All)', unit:'dBm',
-    note:'⚠ RRC_MEASUREMENT_REPORT RSRP — may include triggered/neighbor cell values (biased weak vs serving RSRP).' },
+    note:'⚠ RRC_MEASUREMENT_REPORT RSRP — may include triggered/neighbor values (biased weak vs serving RSRP).' },
   rsrq_db:            { label:'Raster RSRQ',               unit:'dB',   note: null },
   sinr_db:            { label:'Raster SINR',               unit:'dB',   note: null },
   throughput_dl_mbps: { label:'Raster DL Throughput',      unit:'Mbps', note: null },
@@ -1614,9 +1614,13 @@ function _estimateByAzimuth(lat, lon, az_deg, rsrp_dbm, rnti, seed, ta=null, cel
     }
   }
 
-  // Single sector or no multi-sector data: ±beamSpread° deterministic spread
-  const h = rnti > 0 ? rnti : Math.abs((seed * 2654435761) >>> 0);
-  const frac = ((h * 1664525 + 1013904223) >>> 0) / 4294967296;
+  // Single sector: spread within ±beamSpread° using RNTI identity + 5-second time
+  // buckets so different samples from the same UE move within the sector beam
+  // (temporal variation) while samples within the same 5-second window cluster.
+  const rntiHash = rnti > 0 ? (Math.imul(rnti,  0x9E3779B9) >>> 0) : (Math.imul(seed >>> 0, 0x6C62272E) >>> 0);
+  const tBucket  = (Math.floor(seed / 5000) * 0x85EBCA77) >>> 0;
+  const h = (rntiHash ^ tBucket) >>> 0;
+  const frac = ((Math.imul(h, 1664525) + 1013904223) >>> 0) / 4294967296;
   angle_rad = (az_deg + (frac - 0.5) * beamSpread * 2) * Math.PI / 180;
   return {
     lat: lat + (d * Math.cos(angle_rad)) / 111111,
@@ -1691,8 +1695,8 @@ function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS, beamSpre
         const bestCid = Object.entries(cellRsrp).reduce((a, b) => a[1] > b[1] ? a : b)[0];
         const bestCell = cellDb[bestCid];
         const coLocated = bestCell &&
-          Math.abs(pos2.lat - bestCell.lat) < 1e-4 &&
-          Math.abs(pos2.lon - bestCell.lon) < 1e-4;
+          Math.abs(pos2.lat - bestCell.lat) < 2e-4 &&
+          Math.abs(pos2.lon - bestCell.lon) < 2e-4;
         if (coLocated && bestCell.az != null) {
           // Pass full cellRsrp window so _estimateByAzimuth can apply
           // circular-weighted mean of co-located sector azimuths when ≥2 are visible.
@@ -1905,35 +1909,33 @@ function enrichSamplesWithTa(samples, taSources) {
   return enriched;
 }
 
-// Propagate 0x49 serving RSRP to nearby 0x0b measurement-report records.
-// Prefers RNTI match; falls back to same-cell within ±5 s.
+// Propagate 0x49 (INTERNAL_EVENT_UE_MOBILITY_EVAL) serving RSRP to nearby
+// 0x0b (RRC_MEASUREMENT_REPORT) records that lack a serving RSRP value.
+// C-SW uses ONLY 0x49 serving RSRP for the RSRP raster; 0x0b RSRP is triggered/
+// neighbor-biased. This enrichment bridges the two event types.
 function enrichSamplesWithServingRsrp(samples) {
-  // Collect serving-RSRP sources: 0x49 events that have rsrp_dbm but no meas_rsrp_dbm
   const sources = samples.filter(s =>
     s.event_type === 'INTERNAL_EVENT_UE_MOBILITY_EVAL' &&
     s.rsrp_dbm != null && isFinite(s.rsrp_dbm)
   );
   if (!sources.length) return 0;
 
-  // Build per-cell sorted array for binary search
   const byCell = {};
   for (const s of sources) {
     (byCell[s.cell_id] || (byCell[s.cell_id] = [])).push(s);
   }
   for (const arr of Object.values(byCell)) arr.sort((a, b) => a.timestamp_ms - b.timestamp_ms);
 
-  const WINDOW = 5000; // ±5 s
+  const WINDOW = 5000;
   let enriched = 0;
 
   for (const s of samples) {
-    // Only enrich 0x0b records that still have no serving RSRP
     if (s.event_type !== 'RRC_MEASUREMENT_REPORT') continue;
     if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm)) continue;
 
     const arr = byCell[s.cell_id];
     if (!arr) continue;
 
-    // Binary-search closest 0x49 event within ±WINDOW ms
     let lo = 0, hi = arr.length - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
@@ -1946,10 +1948,9 @@ function enrichSamplesWithServingRsrp(samples) {
       const cand = arr[i];
       const dt = Math.abs(cand.timestamp_ms - s.timestamp_ms);
       if (dt > WINDOW) continue;
-      // Prefer RNTI match, then closest time
       const rntiMatch = s.rnti && cand.rnti && s.rnti === cand.rnti;
       if (rntiMatch && dt < bestDt + 500) { bestDt = dt; best = cand; }
-      else if (!rntiMatch && dt < bestDt) { bestDt = dt; best = cand; }
+      else if (!rntiMatch && dt < bestDt)  { bestDt = dt; best = cand; }
     }
     if (best) { s.rsrp_dbm = best.rsrp_dbm; enriched++; }
   }
@@ -2020,8 +2021,8 @@ function applyPlanetLocalization(samples, cellDb, opts = {}) {
       const bestCid  = Object.entries(cellRsrp).reduce((a, b) => a[1] > b[1] ? a : b)[0];
       const bestCell = cellDb[bestCid];
       const coLocated = bestCell &&
-        Math.abs(pos2.lat - bestCell.lat) < 1e-4 &&
-        Math.abs(pos2.lon - bestCell.lon) < 1e-4;
+        Math.abs(pos2.lat - bestCell.lat) < 2e-4 &&
+        Math.abs(pos2.lon - bestCell.lon) < 2e-4;
 
       if (coLocated && bestCell.az != null) {
         const ta   = samp.ta_us;
@@ -2063,7 +2064,7 @@ function applyPlanetLocalization(samples, cellDb, opts = {}) {
 
     if (cell.az != null) {
       const seed = (s.timestamp_ms || 0) ^ (s.cell_id || 0);
-      const est  = _estimateByAzimuth(cell.lat, cell.lon, cell.az, s.rsrp_dbm, 0, seed, ta, null, null, beamSpread);
+      const est  = _estimateByAzimuth(cell.lat, cell.lon, cell.az, s.rsrp_dbm ?? s.meas_rsrp_dbm, 0, seed, ta, null, null, beamSpread);
       s.latitude  = est.lat;
       s.longitude = est.lon;
     } else {
@@ -2267,7 +2268,7 @@ function parseEricssonCTraceBinary(bytes, filename) {
             const word = dv.getUint16(pOff + 42, false);
             const rsrpIe = (word >> 8) & 0x7F;
             const rsrqIe = (word >> 2) & 0x3F;
-            if (rsrpIe > 0) base.meas_rsrp_dbm = rsrpIe - 140;
+            if (rsrpIe > 0) base.meas_rsrp_dbm = rsrpIe - 140; // triggered/neighbor RSRP
             if (rsrqIe > 0) base.rsrq_db  = rsrqIe / 2 - 19.5;
             if (pLen >= 53) base.rnti = dv.getUint16(pOff + 51, false);
             records.push({ ...base, event_type: 'RRC_MEASUREMENT_REPORT' });
@@ -2365,7 +2366,7 @@ function parseEricssonCTrace(text, filename) {
 
     if (eventDesc === 'RRC_MEASUREMENT_REPORT') {
       const rm = rowStr.match(/rsrpResult,(\d+)/);
-      if (rm) meas_rsrp_dbm = +rm[1] - 140;
+      if (rm) meas_rsrp_dbm = +rm[1] - 140; // triggered/neighbor RSRP — store separately
       const rqm = rowStr.match(/rsrqResult,(\d+)/);
       if (rqm) rsrq_db = +rqm[1] / 2 - 19.5;
 
@@ -2692,7 +2693,6 @@ function renderAll() {
     events:  document.getElementById('chk-events').checked,
   };
   const metric = document.getElementById('sel-metric').value;
-  // Compute P5/median/P95 of current metric for legend stats
   const metricVals = state.filtered.map(s=>s[metric]).filter(v=>v!=null&&isFinite(v)).sort((a,b)=>a-b);
   // Per-bin counts for legend
   const mBins = METRIC_BINS[metric] || RSRP_BINS;
@@ -2962,13 +2962,12 @@ function renderSiteMarkers() {
 }
 
 function buildTooltip(s) {
-  const rsrpLine = s.rsrp_dbm != null && isFinite(s.rsrp_dbm)
-    ? `RSRP (srv): <b>${fmt(s.rsrp_dbm)} dBm</b>`
+  const rsrpLabel = (s.rsrp_dbm != null && isFinite(s.rsrp_dbm))
+    ? `RSRP(srv):<b>${fmt(s.rsrp_dbm)} dBm</b>`
     : (s.meas_rsrp_dbm != null && isFinite(s.meas_rsrp_dbm)
-        ? `RSRP (meas): <b>${fmt(s.meas_rsrp_dbm)} dBm</b>`
-        : `RSRP: —`);
+        ? `RSRP(meas):<b>${fmt(s.meas_rsrp_dbm)} dBm</b>` : `RSRP:—`);
   return `<b>${new Date(s.timestamp_ms).toISOString().slice(11,19)} UTC</b><br>` +
-    `${rsrpLine} | RSRQ: ${fmt(s.rsrq_db)} dB<br>` +
+    `${rsrpLabel} | RSRQ: ${fmt(s.rsrq_db)} dB<br>` +
     `SINR: ${fmt(s.sinr_db)} dB | CQI: ${s.cqi??'—'}<br>` +
     `Cell: ${s.cell_id} | PCI: ${s.pci}<br>` +
     (s.event_type ? `Event: <b>${s.event_type.replace('INTERNAL_','')}</b>` : '');
@@ -3444,9 +3443,9 @@ async function processFiles() {
     const taEnriched = enrichSamplesWithTa(allCtrParsed, state.taSources);
     if (taEnriched > 0) msgs.push(`TA enriched: ${taEnriched.toLocaleString()} measurement events`);
 
-    // Propagate 0x49 serving RSRP to 0x0b records that lack a serving RSRP value
+    // Propagate 0x49 serving RSRP to 0x0b records within ±5 s (same cell/RNTI)
     const rsrpEnriched = enrichSamplesWithServingRsrp(allCtrParsed);
-    if (rsrpEnriched > 0) msgs.push(`Serving RSRP enriched: ${rsrpEnriched.toLocaleString()} measurement-report events`);
+    if (rsrpEnriched > 0) msgs.push(`Serving RSRP enriched: ${rsrpEnriched.toLocaleString()} meas-report events`);
 
     // Localize and stage each file's records
     for (const { parsed, name } of ctrBatches) {
