@@ -969,15 +969,11 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
       <option value="10">10</option>
     </select>
 
-    <div class="sec-hdr">Geolocation Method</div>
-    <div class="radio-grp" style="margin-bottom:4px">
-      <label><input type="radio" name="geomethod" value="rsrp" checked> RSRP Path-Loss</label>
-      <label><input type="radio" name="geomethod" value="planet"> Planet-style</label>
-    </div>
-    <div id="planet-geo-opts" style="display:none;border-left:2px solid #e94560;padding-left:8px;margin-bottom:6px">
-      <div style="font-size:9px;color:#aaa;margin-bottom:5px">Applies Planet's 5 filters:<br>① Min RSRP  ② TA distance  ③ Azimuth+beamwidth<br>④ Best-server (windowed centroid)  ⑤ Clutter (N/A)</div>
+    <div class="sec-hdr">Geolocation Parameters</div>
+    <div style="border-left:2px solid #e94560;padding-left:8px;margin-bottom:6px">
+      <div style="font-size:9px;color:#aaa;margin-bottom:5px">Per-sample placement: serving cell + TA distance + sector azimuth.<br>TA × 78.125 m when available; RSRP path-loss fallback otherwise.</div>
       <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">Min RSRP (dBm)</label>
-      <input type="number" id="geo-min-rsrp" value="-110" step="5" min="-140" max="-40"
+      <input type="number" id="geo-min-rsrp" value="-115" step="5" min="-140" max="-40"
              style="width:80px;background:#1a1a3e;border:1px solid #3a3a6e;color:#e0e0e0;padding:2px 4px;border-radius:3px;margin-bottom:4px">
       <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">TA distance (m)  <span style="color:#555">min – max</span></label>
       <div style="display:flex;gap:4px;align-items:center;margin-bottom:6px">
@@ -989,12 +985,10 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
       </div>
       <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">
         Sector spread (±°) <span id="geo-spread-val" style="color:#e94560;font-weight:bold">30</span>°
-        <span style="color:#555;font-size:9px"> — used when single sector visible</span>
       </label>
       <input type="range" id="geo-beam-spread" value="30" min="5" max="60" step="5"
              style="width:100%;accent-color:#e94560;margin-bottom:6px"
              oninput="document.getElementById('geo-spread-val').textContent=this.value">
-      <div style="font-size:9px;color:#666;margin-bottom:5px">TA filter only applies when TA is present in data. Without TA, RSRP path-loss is used as fallback.</div>
       <button id="btn-regeolocate" style="width:100%;padding:5px;background:#1a1a3e;border:1px solid #e94560;color:#e94560;border-radius:4px;cursor:pointer;font-size:10px;font-weight:bold">↺ Apply Geolocation</button>
     </div>
 
@@ -1155,16 +1149,14 @@ function updateLegend(metric, stats) {
   const rows  = bins.slice().reverse().map(b => {
     const cnt = stats?.binCounts?.[b.label] ?? null;
     const pct = (cnt != null && total > 0) ? (cnt / total * 100).toFixed(0) : null;
-    const countStr = cnt != null
-      ? `<span style="color:#aaa;font-size:9px;margin-left:auto;white-space:nowrap">${cnt.toLocaleString()} (${pct}%)</span>`
-      : '';
+    const cntStr = cnt != null
+      ? `<span style="color:#aaa;font-size:9px;margin-left:auto;white-space:nowrap">${cnt.toLocaleString()} (${pct}%)</span>` : '';
     return `<div class="legend-row" style="justify-content:space-between">` +
       `<div style="display:flex;align-items:center;gap:6px">` +
       `<div class="legend-dot" style="background:${b.color};border-radius:2px"></div>${b.label}</div>` +
-      countStr + `</div>`;
+      cntStr + `</div>`;
   }).join('');
-  const noteHtml = meta.note
-    ? `<br><span style="color:#e94560;font-size:9px">${meta.note}</span>` : '';
+  const noteHtml = meta.note ? `<br><span style="color:#e94560;font-size:9px">${meta.note}</span>` : '';
   const statsHtml = (stats && stats.p5 != null)
     ? `<div style="color:#aaa;font-size:9px;margin-top:5px;border-top:1px solid #2a2a4a;padding-top:4px">` +
       `P5/Median/P95<br>${stats.p5.toFixed(0)} / ${stats.med.toFixed(0)} / ${stats.p95.toFixed(0)} ${meta.unit}` +
@@ -1567,176 +1559,72 @@ function buildCellDb(cellMeta) {
   return db;
 }
 
-// Estimate UE position using sector azimuth + TA or RSRP-derived distance.
-// Distance: TA × 78.125 m (LTE resolution, 1 unit = 78.125 m); up to 2500 m.
-// Path-loss fallback (when TA absent): realistic macro calibration — 500 m at -95 dBm,
-//   formula: 50 × 10^((-rsrp − 60) / 35), giving ~180 m at -80 dBm, ~1340 m at -110 dBm.
-// Direction: when cellRsrp contains ≥2 distinct sector azimuths, the RSRP-weighted
-//   circular mean gives the bearing (Planet-style triangulation for co-located sectors).
-//   Otherwise: serving-cell azimuth ± beamSpread° deterministic spread (RNTI or seed hash).
-function _estimateByAzimuth(lat, lon, az_deg, rsrp_dbm, rnti, seed, ta=null, cellRsrp=null, cellDb=null, beamSpread=30) {
-  // Distance
-  let d;
-  if (ta != null && isFinite(ta) && ta >= 1 && ta <= 1282) {
-    d = Math.max(50, Math.min(2500, ta * 78.125));
-  } else {
-    const rsrp = (rsrp_dbm != null && isFinite(rsrp_dbm) && rsrp_dbm > -135)
-      ? rsrp_dbm : -100;
-    d = Math.max(50, Math.min(2000, 50 * Math.pow(10, (-rsrp - 60) / 35)));
-  }
+// ── C-SW VDT geolocation ─────────────────────────────────────────────────────
+// Per-sample placement matching C-SW raster pipeline:
+//   1. Serving cell position from cell DB (cellId → lat/lon/azimuth)
+//   2. Distance = TA × 78.125 m (LTE TA resolution); RSRP path-loss fallback
+//      when TA is absent: 50 × 10^((-rsrp − 60) / 35) m
+//   3. Direction = sector azimuth ± beamSpread° seeded by RNTI + 5-second
+//      time bucket (temporal movement within beam, stable per 5-second window)
+// No RNTI grouping, no cross-cell centroid, no triangulation.
+function applyVdtLocalization(samples, cellDb, opts = {}) {
+  const beamSpread = opts.beamSpread ?? 30;
+  const minRsrp    = opts.minRsrp    ?? -115;
+  const minDist    = opts.minDist    ?? 0;
+  const maxDist    = opts.maxDist    ?? 2500;
 
-  const cosLat = Math.cos(lat * Math.PI / 180);
-  let angle_rad;
-
-  // Multi-sector circular weighted mean (when window has ≥2 distinct sector azimuths)
-  if (cellRsrp && cellDb) {
-    let sinSum = 0, cosSum = 0, totalW = 0;
-    const seenAz = new Set();
-    for (const [cid, r] of Object.entries(cellRsrp)) {
-      const cell = cellDb[cid];
-      if (!cell || cell.az == null) continue;
-      const w = Math.pow(10, r / 10);
-      sinSum += w * Math.sin(cell.az * Math.PI / 180);
-      cosSum += w * Math.cos(cell.az * Math.PI / 180);
-      totalW += w;
-      seenAz.add(cell.az);
-    }
-    if (seenAz.size >= 2 && totalW > 0) {
-      const mag = Math.sqrt(sinSum * sinSum + cosSum * cosSum);
-      // Only use circular mean when it gives a clear direction (not canceling)
-      if (mag / totalW > 0.05) {
-        angle_rad = Math.atan2(sinSum, cosSum);
-        return {
-          lat: lat + (d * Math.cos(angle_rad)) / 111111,
-          lon: lon + (d * Math.sin(angle_rad)) / (111111 * cosLat),
-        };
-      }
-    }
-  }
-
-  // Single sector: spread within ±beamSpread° using RNTI identity + 5-second time
-  // buckets so different samples from the same UE move within the sector beam
-  // (temporal variation) while samples within the same 5-second window cluster.
-  const rntiHash = rnti > 0 ? (Math.imul(rnti,  0x9E3779B9) >>> 0) : (Math.imul(seed >>> 0, 0x6C62272E) >>> 0);
-  const tBucket  = (Math.floor(seed / 5000) * 0x85EBCA77) >>> 0;
-  const h = (rntiHash ^ tBucket) >>> 0;
-  const frac = ((Math.imul(h, 1664525) + 1013904223) >>> 0) / 4294967296;
-  angle_rad = (az_deg + (frac - 0.5) * beamSpread * 2) * Math.PI / 180;
-  return {
-    lat: lat + (d * Math.cos(angle_rad)) / 111111,
-    lon: lon + (d * Math.sin(angle_rad)) / (111111 * cosLat),
-  };
-}
-
-function _weightedCentroid(cellRsrp, cellDb) {
-  let latAcc = 0, lonAcc = 0, wAcc = 0;
-  for (const [cid, rsrp] of Object.entries(cellRsrp)) {
-    const cell = cellDb[cid];
-    if (!cell) continue;
-    const w = Math.pow(10, rsrp / 10);
-    latAcc += w * cell.lat;
-    lonAcc += w * cell.lon;
-    wAcc   += w;
-  }
-  if (wAcc === 0) return null;
-  return { lat: latAcc / wAcc, lon: lonAcc / wAcc };
-}
-
-function applyUeLocalization(samples, cellDb, windowMs = _UE_WINDOW_MS, beamSpread = 30) {
-  const dbKeys = Object.keys(cellDb);
   const sampleCids = [...new Set(samples.map(s => String(s.cell_id)))];
-  const matched = sampleCids.filter(c => cellDb[c]);
-  console.log(`[UE-Loc] samples=${samples.length} | cellDb=${dbKeys.length} cells | sample cell_ids=${sampleCids.slice(0,5).join(',')} | matched=${matched.length}`);
-  if (matched.length === 0 && dbKeys.length > 0) {
-    console.warn('[UE-Loc] No cell_id overlap between trace and DB! Trace IDs:', sampleCids.slice(0,8), 'DB IDs:', dbKeys.slice(0,8));
-  }
+  const matchedCids = sampleCids.filter(c => cellDb[c]);
+  console.log(`[VDT-Loc] samples=${samples.length} cellDb=${Object.keys(cellDb).length} matched=${matchedCids.length}`);
+  if (!matchedCids.length && Object.keys(cellDb).length > 0)
+    console.warn('[VDT-Loc] No cell_id overlap! Trace:', sampleCids.slice(0,6), 'DB:', Object.keys(cellDb).slice(0,6));
 
-  let pass1 = 0, pass2 = 0;
+  let placed = 0, skipRsrp = 0, skipDist = 0, noCell = 0;
 
-  // Group by RNTI (skip 0)
-  const groups = {};
-  for (let i = 0; i < samples.length; i++) {
-    const rnti = samples[i].rnti || 0;
-    if (rnti === 0) continue;
-    if (!groups[rnti]) groups[rnti] = [];
-    groups[rnti].push(i);
-  }
-  console.log(`[UE-Loc] RNTI groups: ${Object.keys(groups).length}, RNTIs: ${Object.keys(groups).slice(0,6).join(',')}`);
-
-  // Pass 1: windowed weighted centroid per RNTI
-  for (const [, indices] of Object.entries(groups)) {
-    indices.sort((a, b) => (samples[a].timestamp_ms || 0) - (samples[b].timestamp_ms || 0));
-    const ts = indices.map(i => samples[i].timestamp_ms || 0);
-    let lo = 0, hi = 0;
-    for (let pos = 0; pos < indices.length; pos++) {
-      const t = ts[pos];
-      while (lo < indices.length && ts[lo] < t - windowMs) lo++;
-      while (hi < indices.length && ts[hi] <= t + windowMs) hi++;
-
-      const cellRsrp = {};
-      for (let k = lo; k < hi; k++) {
-        const samp = samples[indices[k]];
-        const cid = String(samp.cell_id);
-        if (!cellDb[cid]) continue;
-        const rsrp = samp.rsrp_dbm ?? samp.meas_rsrp_dbm;
-        if (rsrp != null && isFinite(rsrp)) {
-          if (cellRsrp[cid] == null || rsrp > cellRsrp[cid])
-            cellRsrp[cid] = rsrp;
-        }
-      }
-
-      if (Object.keys(cellRsrp).length === 0) continue;
-      const samp = samples[indices[pos]];
-      if (samp.latitude != null) continue;
-      const pos2 = _weightedCentroid(cellRsrp, cellDb);
-      if (pos2) {
-        // If centroid is co-located with the best-RSRP cell (all cells on same tower),
-        // use azimuth + distance estimation for geographic spread.
-        const bestCid = Object.entries(cellRsrp).reduce((a, b) => a[1] > b[1] ? a : b)[0];
-        const bestCell = cellDb[bestCid];
-        const coLocated = bestCell &&
-          Math.abs(pos2.lat - bestCell.lat) < 2e-4 &&
-          Math.abs(pos2.lon - bestCell.lon) < 2e-4;
-        if (coLocated && bestCell.az != null) {
-          // Pass full cellRsrp window so _estimateByAzimuth can apply
-          // circular-weighted mean of co-located sector azimuths when ≥2 are visible.
-          const servCell = cellDb[String(samp.cell_id)] || bestCell;
-          const est = _estimateByAzimuth(
-            servCell.lat, servCell.lon, servCell.az,
-            cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0,
-            samp.ta_us, cellRsrp, cellDb, beamSpread);
-          samp.latitude  = est.lat;
-          samp.longitude = est.lon;
-        } else {
-          samp.latitude  = pos2.lat;
-          samp.longitude = pos2.lon;
-        }
-        samp._geo_synthetic = true;
-        pass1++;
-      }
-    }
-  }
-
-  // Pass 2: RNTI=0 / unpositioned — use azimuth+distance if available
   for (const s of samples) {
-    if (s.latitude != null) continue;
+    if (s.latitude != null) continue;  // GPS or already positioned
+
     const cell = cellDb[String(s.cell_id)];
-    if (!cell) continue;
-    if (cell.az != null) {
-      const seed = (s.timestamp_ms || 0) ^ (s.cell_id || 0);
-      const est = _estimateByAzimuth(cell.lat, cell.lon, cell.az,
-        s.rsrp_dbm ?? s.meas_rsrp_dbm, 0, seed, s.ta_us, null, null, beamSpread);
-      s.latitude  = est.lat;
-      s.longitude = est.lon;
+    if (!cell) { noCell++; continue; }
+
+    const rsrp = s.rsrp_dbm ?? s.meas_rsrp_dbm;
+
+    // Quality gate: exclude samples below noise floor
+    if (rsrp != null && isFinite(rsrp) && rsrp < minRsrp) { skipRsrp++; continue; }
+
+    // Distance
+    const ta = s.ta_us;
+    let d;
+    if (ta != null && isFinite(ta) && ta >= 1 && ta <= 1282) {
+      d = ta * 78.125;
+      if (d < minDist || d > maxDist) { skipDist++; continue; }
     } else {
+      const r = (rsrp != null && isFinite(rsrp) && rsrp > -135) ? rsrp : -100;
+      d = 50 * Math.pow(10, (-r - 60) / 35);
+    }
+    d = Math.max(50, Math.min(maxDist, d));
+
+    if (cell.az == null) {
       s.latitude  = cell.lat;
       s.longitude = cell.lon;
+    } else {
+      // Direction: RNTI identity XOR'd with 5-second time bucket
+      const rntiHash = s.rnti > 0
+        ? (Math.imul(s.rnti, 0x9E3779B9) >>> 0)
+        : (Math.imul(((s.timestamp_ms || 0) >>> 0) ^ (s.cell_id | 0), 0x6C62272E) >>> 0);
+      const tBucket  = (Math.floor((s.timestamp_ms || 0) / 5000) * 0x85EBCA77) >>> 0;
+      const h = (rntiHash ^ tBucket) >>> 0;
+      const frac = ((Math.imul(h, 1664525) + 1013904223) >>> 0) / 4294967296;
+      const angle_rad = (cell.az + (frac - 0.5) * beamSpread * 2) * Math.PI / 180;
+      const cosLat = Math.cos(cell.lat * Math.PI / 180);
+      s.latitude  = cell.lat + (d * Math.cos(angle_rad)) / 111111;
+      s.longitude = cell.lon + (d * Math.sin(angle_rad)) / (111111 * cosLat);
     }
     s._geo_synthetic = true;
-    pass2++;
+    placed++;
   }
 
-  console.log(`[UE-Loc] positioned: pass1=${pass1}, pass2=${pass2}, total=${pass1+pass2}`);
+  console.log(`[VDT-Loc] placed=${placed} skipRsrp=${skipRsrp} skipDist=${skipDist} noCell=${noCell}`);
   return samples;
 }
 
@@ -1911,8 +1799,8 @@ function enrichSamplesWithTa(samples, taSources) {
 
 // Propagate 0x49 (INTERNAL_EVENT_UE_MOBILITY_EVAL) serving RSRP to nearby
 // 0x0b (RRC_MEASUREMENT_REPORT) records that lack a serving RSRP value.
-// C-SW uses ONLY 0x49 serving RSRP for the RSRP raster; 0x0b RSRP is triggered/
-// neighbor-biased. This enrichment bridges the two event types.
+// C-SW uses ONLY 0x49 serving RSRP for the RSRP raster; 0x0b RSRP is
+// triggered/neighbor-biased. This enrichment bridges the two event types.
 function enrichSamplesWithServingRsrp(samples) {
   const sources = samples.filter(s =>
     s.event_type === 'INTERNAL_EVENT_UE_MOBILITY_EVAL' &&
@@ -1928,22 +1816,17 @@ function enrichSamplesWithServingRsrp(samples) {
 
   const WINDOW = 5000;
   let enriched = 0;
-
   for (const s of samples) {
     if (s.event_type !== 'RRC_MEASUREMENT_REPORT') continue;
     if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm)) continue;
-
     const arr = byCell[s.cell_id];
     if (!arr) continue;
 
     let lo = 0, hi = arr.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (arr[mid].timestamp_ms < s.timestamp_ms) lo = mid + 1; else hi = mid;
-    }
+    while (lo < hi) { const mid = (lo+hi)>>1; if (arr[mid].timestamp_ms < s.timestamp_ms) lo=mid+1; else hi=mid; }
 
     let best = null, bestDt = WINDOW;
-    for (const i of [lo - 1, lo, lo + 1]) {
+    for (const i of [lo-1, lo, lo+1]) {
       if (i < 0 || i >= arr.length) continue;
       const cand = arr[i];
       const dt = Math.abs(cand.timestamp_ms - s.timestamp_ms);
@@ -1957,135 +1840,17 @@ function enrichSamplesWithServingRsrp(samples) {
   return enriched;
 }
 
-// ── Planet-style geolocation ──────────────────────────────────────────────────
-// Applies the same 5-filter pipeline Planet uses for call-trace geolocation:
-//   1. Serving cell RSRP filter  — exclude below minRsrp (weak / no-signal areas)
-//   2. TA distance filter        — TA × 78.125 m must be within [minDist, maxDist]
-//   3. Azimuth + beamwidth       — same ±60° sector wedge as VDT (from cell DB az)
-//   4. Best-server approximation — windowed centroid picks the dominant cell
-//   5. Clutter (not applicable without clutter data — omitted)
-// When TA is 0 or unavailable, falls back to RSRP path-loss distance (same as
-// VDT method) so the filter still produces a result.
-
+// (kept for any remaining callers; now delegates to applyVdtLocalization)
 function applyPlanetLocalization(samples, cellDb, opts = {}) {
   const minRsrp    = opts.minRsrp    ?? -110;
   const minDist    = opts.minDist    ?? 0;
-  const maxDist    = opts.maxDist    ?? 2500;
-  const beamSpread = opts.beamSpread ?? 30;
-
-  let pass1 = 0, pass2 = 0, skipRsrp = 0, skipDist = 0;
-
-  // ── Pass 1: RNTI-grouped windowed centroid (same window as VDT method) ──────
-  const groups = {};
-  for (let i = 0; i < samples.length; i++) {
-    const rnti = samples[i].rnti || 0;
-    if (rnti === 0) continue;
-    if (!groups[rnti]) groups[rnti] = [];
-    groups[rnti].push(i);
-  }
-
-  for (const [, indices] of Object.entries(groups)) {
-    indices.sort((a, b) => (samples[a].timestamp_ms || 0) - (samples[b].timestamp_ms || 0));
-    const ts = indices.map(i => samples[i].timestamp_ms || 0);
-    let lo = 0, hi = 0;
-
-    for (let pos = 0; pos < indices.length; pos++) {
-      const t = ts[pos];
-      while (lo < indices.length && ts[lo] < t - _UE_WINDOW_MS) lo++;
-      while (hi < indices.length && ts[hi] <= t + _UE_WINDOW_MS) hi++;
-
-      const samp = samples[indices[pos]];
-      if (samp.latitude != null) continue;
-
-      // Filter 1: minimum serving RSRP
-      if (samp.rsrp_dbm != null && isFinite(samp.rsrp_dbm) && samp.rsrp_dbm < minRsrp) {
-        skipRsrp++;
-        continue;
-      }
-
-      // Build windowed cell→max-RSRP map (best-server approximation)
-      const cellRsrp = {};
-      for (let k = lo; k < hi; k++) {
-        const s2  = samples[indices[k]];
-        const cid = String(s2.cell_id);
-        if (!cellDb[cid]) continue;
-        const r = s2.rsrp_dbm ?? s2.meas_rsrp_dbm;
-        if (r != null && isFinite(r) && (cellRsrp[cid] == null || r > cellRsrp[cid]))
-          cellRsrp[cid] = r;
-      }
-      if (!Object.keys(cellRsrp).length) continue;
-
-      const pos2 = _weightedCentroid(cellRsrp, cellDb);
-      if (!pos2) continue;
-
-      const bestCid  = Object.entries(cellRsrp).reduce((a, b) => a[1] > b[1] ? a : b)[0];
-      const bestCell = cellDb[bestCid];
-      const coLocated = bestCell &&
-        Math.abs(pos2.lat - bestCell.lat) < 2e-4 &&
-        Math.abs(pos2.lon - bestCell.lon) < 2e-4;
-
-      if (coLocated && bestCell.az != null) {
-        const ta   = samp.ta_us;
-        const dTa  = (ta != null && isFinite(ta) && ta > 0) ? ta * 78.125 : null;
-        // Filter 2: TA distance range (only applied when TA is present)
-        if (dTa != null && (dTa < minDist || dTa > maxDist)) { skipDist++; continue; }
-        // Pass full cellRsrp window for circular-weighted mean across co-located sectors.
-        const servCell = cellDb[String(samp.cell_id)] || bestCell;
-        const est = _estimateByAzimuth(
-          servCell.lat, servCell.lon, servCell.az,
-          cellRsrp[bestCid], samp.rnti || 0, samp.timestamp_ms || 0, ta, cellRsrp, cellDb, beamSpread);
-        samp.latitude  = est.lat;
-        samp.longitude = est.lon;
-      } else {
-        samp.latitude  = pos2.lat;
-        samp.longitude = pos2.lon;
-      }
-      samp._geo_synthetic = true;
-      pass1++;
-    }
-  }
-
-  // ── Pass 2: RNTI=0 / still unpositioned ──────────────────────────────────
-  for (const s of samples) {
-    if (s.latitude != null) continue;
-    const cell = cellDb[String(s.cell_id)];
-    if (!cell) continue;
-
-    // Filter 1: minimum RSRP
-    if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm) && s.rsrp_dbm < minRsrp) {
-      skipRsrp++;
-      continue;
-    }
-
-    const ta  = s.ta_us;
-    const dTa = (ta != null && isFinite(ta) && ta > 0) ? ta * 78.125 : null;
-    // Filter 2: TA distance range
-    if (dTa != null && (dTa < minDist || dTa > maxDist)) { skipDist++; continue; }
-
-    if (cell.az != null) {
-      const seed = (s.timestamp_ms || 0) ^ (s.cell_id || 0);
-      const est  = _estimateByAzimuth(cell.lat, cell.lon, cell.az, s.rsrp_dbm ?? s.meas_rsrp_dbm, 0, seed, ta, null, null, beamSpread);
-      s.latitude  = est.lat;
-      s.longitude = est.lon;
-    } else {
-      s.latitude  = cell.lat;
-      s.longitude = cell.lon;
-    }
-    s._geo_synthetic = true;
-    pass2++;
-  }
-
-  console.log(`[Planet-Loc] pass1=${pass1} pass2=${pass2} skipRsrp=${skipRsrp} skipDist=${skipDist}`);
-  return samples;
+  return applyVdtLocalization(samples, cellDb, opts);
 }
 
 // Re-run geolocation on raw samples whenever method or parameters change.
 // rawSamples preserves the pre-localization state; GPS positions are kept.
 function reGeolocate() {
   if (!state.rawSamples.length) { setStatus('No data to re-geolocate.'); return; }
-
-  const method  = document.querySelector('input[name=geomethod]:checked').value;
-  const hasDb   = Object.keys(state.cellDb).length > 0;
 
   // Start from raw snapshot — strip synthetic positions, preserve GPS positions
   state.samples = state.rawSamples.map(s => {
@@ -2102,27 +1867,21 @@ function reGeolocate() {
     state.samples = correlateGps(state.samples, state.gpsPts);
   }
 
-  if (hasDb) {
-    const beamSpread = parseFloat(document.getElementById('geo-beam-spread')?.value) || 30;
-    if (method === 'planet') {
-      const opts = {
-        minRsrp:    parseFloat(document.getElementById('geo-min-rsrp').value) ?? -110,
-        minDist:    parseFloat(document.getElementById('geo-min-dist').value) ?? 0,
-        maxDist:    parseFloat(document.getElementById('geo-max-dist').value) ?? 2500,
-        beamSpread,
-      };
-      applyPlanetLocalization(state.samples, state.cellDb, opts);
-    } else {
-      applyUeLocalization(state.samples, state.cellDb, _UE_WINDOW_MS, beamSpread);
-    }
+  if (Object.keys(state.cellDb).length > 0) {
+    const opts = {
+      beamSpread: parseFloat(document.getElementById('geo-beam-spread')?.value) || 30,
+      minRsrp:    parseFloat(document.getElementById('geo-min-rsrp')?.value)    ?? -115,
+      minDist:    parseFloat(document.getElementById('geo-min-dist')?.value)    ?? 0,
+      maxDist:    parseFloat(document.getElementById('geo-max-dist')?.value)    ?? 2500,
+    };
+    applyVdtLocalization(state.samples, state.cellDb, opts);
   }
 
   state.samples.forEach(enrichSample);
   state.filtered = applyFilters(state.samples);
 
   const posCount = state.samples.filter(s => s.latitude != null).length;
-  const label    = method === 'planet' ? 'Planet-style' : 'RSRP Path-Loss';
-  setStatus(`Geolocation: ${label} · ${posCount.toLocaleString()} / ${state.samples.length.toLocaleString()} positioned`);
+  setStatus(`Geolocation: ${posCount.toLocaleString()} / ${state.samples.length.toLocaleString()} samples positioned`);
 
   renderAll();
   renderTimeline(state.filtered);
@@ -2268,8 +2027,8 @@ function parseEricssonCTraceBinary(bytes, filename) {
             const word = dv.getUint16(pOff + 42, false);
             const rsrpIe = (word >> 8) & 0x7F;
             const rsrqIe = (word >> 2) & 0x3F;
-            if (rsrpIe > 0) base.meas_rsrp_dbm = rsrpIe - 140; // triggered/neighbor RSRP
-            if (rsrqIe > 0) base.rsrq_db  = rsrqIe / 2 - 19.5;
+            if (rsrpIe > 0) base.meas_rsrp_dbm = rsrpIe - 140;
+            if (rsrqIe > 0) base.rsrq_db       = rsrqIe / 2 - 19.5;
             if (pLen >= 53) base.rnti = dv.getUint16(pOff + 51, false);
             records.push({ ...base, event_type: 'RRC_MEASUREMENT_REPORT' });
 
@@ -2366,7 +2125,7 @@ function parseEricssonCTrace(text, filename) {
 
     if (eventDesc === 'RRC_MEASUREMENT_REPORT') {
       const rm = rowStr.match(/rsrpResult,(\d+)/);
-      if (rm) meas_rsrp_dbm = +rm[1] - 140; // triggered/neighbor RSRP — store separately
+      if (rm) meas_rsrp_dbm = +rm[1] - 140;
       const rqm = rowStr.match(/rsrqResult,(\d+)/);
       if (rqm) rsrq_db = +rqm[1] / 2 - 19.5;
 
@@ -2693,8 +2452,8 @@ function renderAll() {
     events:  document.getElementById('chk-events').checked,
   };
   const metric = document.getElementById('sel-metric').value;
+  // Compute P5/median/P95 of current metric for legend stats
   const metricVals = state.filtered.map(s=>s[metric]).filter(v=>v!=null&&isFinite(v)).sort((a,b)=>a-b);
-  // Per-bin counts for legend
   const mBins = METRIC_BINS[metric] || RSRP_BINS;
   const binCounts = {};
   mBins.forEach(b => { binCounts[b.label] = 0; });
@@ -2962,12 +2721,13 @@ function renderSiteMarkers() {
 }
 
 function buildTooltip(s) {
-  const rsrpLabel = (s.rsrp_dbm != null && isFinite(s.rsrp_dbm))
-    ? `RSRP(srv):<b>${fmt(s.rsrp_dbm)} dBm</b>`
-    : (s.meas_rsrp_dbm != null && isFinite(s.meas_rsrp_dbm)
-        ? `RSRP(meas):<b>${fmt(s.meas_rsrp_dbm)} dBm</b>` : `RSRP:—`);
+  const rsrpSrv  = s.rsrp_dbm      != null && isFinite(s.rsrp_dbm)      ? `${fmt(s.rsrp_dbm)} dBm`      : '—';
+  const rsrpMeas = s.meas_rsrp_dbm != null && isFinite(s.meas_rsrp_dbm) ? `${fmt(s.meas_rsrp_dbm)} dBm` : null;
+  const rsrpLine = rsrpMeas
+    ? `RSRP(srv): <b>${rsrpSrv}</b> | RSRP(meas): ${rsrpMeas}`
+    : `RSRP: <b>${rsrpSrv}</b>`;
   return `<b>${new Date(s.timestamp_ms).toISOString().slice(11,19)} UTC</b><br>` +
-    `${rsrpLabel} | RSRQ: ${fmt(s.rsrq_db)} dB<br>` +
+    `${rsrpLine} | RSRQ: ${fmt(s.rsrq_db)} dB<br>` +
     `SINR: ${fmt(s.sinr_db)} dB | CQI: ${s.cqi??'—'}<br>` +
     `Cell: ${s.cell_id} | PCI: ${s.pci}<br>` +
     (s.event_type ? `Event: <b>${s.event_type.replace('INTERNAL_','')}</b>` : '');
@@ -3443,7 +3203,6 @@ async function processFiles() {
     const taEnriched = enrichSamplesWithTa(allCtrParsed, state.taSources);
     if (taEnriched > 0) msgs.push(`TA enriched: ${taEnriched.toLocaleString()} measurement events`);
 
-    // Propagate 0x49 serving RSRP to 0x0b records within ±5 s (same cell/RNTI)
     const rsrpEnriched = enrichSamplesWithServingRsrp(allCtrParsed);
     if (rsrpEnriched > 0) msgs.push(`Serving RSRP enriched: ${rsrpEnriched.toLocaleString()} meas-report events`);
 
@@ -3457,7 +3216,7 @@ async function processFiles() {
         msgs.push(`Cell match: ${matchedCids.length}/${traceCids.length} cells matched DB (trace: [${traceCids.slice(0,4).join(',')}] DB: [${Object.keys(state.cellDb).slice(0,4).join(',')}])`);
         if (matchedCids.length === 0)
           msgs.push(`⚠ No cell IDs match between trace and DB — check eNB ID format in DB.csv`);
-        applyUeLocalization(parsed, state.cellDb);
+        applyVdtLocalization(parsed, state.cellDb);
       }
       parsed.forEach(enrichSample);
       newSamples = newSamples.concat(parsed);
