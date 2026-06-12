@@ -995,8 +995,17 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
         Sector spread (±°) <span id="geo-spread-val" style="color:#e94560;font-weight:bold">30</span>°
       </label>
       <input type="range" id="geo-beam-spread" value="30" min="5" max="60" step="5"
-             style="width:100%;accent-color:#e94560;margin-bottom:6px"
+             style="width:100%;accent-color:#e94560;margin-bottom:8px"
              oninput="document.getElementById('geo-spread-val').textContent=this.value">
+      <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">
+        RSRP Calibration Offset (dB)
+        <span style="color:#555;font-size:9px"> — shift all RSRP values ± this amount</span>
+      </label>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+        <input type="number" id="rsrp-cal-offset" value="0" step="1" min="-40" max="40"
+               style="width:58px;background:#1a1a3e;border:1px solid #3a3a6e;color:#e0e0e0;padding:2px 4px;border-radius:3px">
+        <span style="font-size:9px;color:#555">dB &nbsp;(0 = no correction)</span>
+      </div>
       <button id="btn-regeolocate" style="width:100%;padding:5px;background:#1a1a3e;border:1px solid #e94560;color:#e94560;border-radius:4px;cursor:pointer;font-size:10px;font-weight:bold">↺ Apply Geolocation</button>
     </div>
 
@@ -1363,6 +1372,17 @@ function classifyRsrp(v) {
 }
 
 function enrichSample(s) {
+  // Apply RSRP calibration offset (idempotent: always uses _rsrp_raw_dbm as the base
+  // so repeated calls or reGeolocate never double-apply the offset).
+  const calOff = parseFloat(document.getElementById('rsrp-cal-offset')?.value) || 0;
+
+  const rawR  = s._rsrp_raw_dbm      ?? s.rsrp_dbm;
+  const rawMR = s._meas_rsrp_raw_dbm ?? s.meas_rsrp_dbm;
+  s._rsrp_raw_dbm      = rawR;
+  s._meas_rsrp_raw_dbm = rawMR;
+  s.rsrp_dbm      = (rawR  != null && isFinite(rawR))  ? rawR  + calOff : rawR;
+  s.meas_rsrp_dbm = (rawMR != null && isFinite(rawMR)) ? rawMR + calOff : rawMR;
+
   if (s.rsrp_dbm != null && isFinite(s.rsrp_dbm)) {
     const bin = classifyRsrp(s.rsrp_dbm);
     s.rsrp_class = bin.label;
@@ -1373,7 +1393,6 @@ function enrichSample(s) {
   }
   if (!s.tech) {
     const e = s.earfcn || 0;
-    // earfcn=0 means not set (common in binary CTR) → LTE; >599999 → NR
     s.tech = e > 599999 ? 'NR' : 'LTE';
   }
   return s;
@@ -2334,6 +2353,16 @@ function parseEricssonCTraceBinary(bytes, filename) {
   }
 
   const distinctCells = [...new Set(records.map(r => r.cell_id))];
+
+  // RSRP diagnostic: log raw decoded values to help detect offset issues.
+  const rsrpVals = records.map(r => r.rsrp_dbm ?? r.meas_rsrp_dbm).filter(v => v != null && isFinite(v));
+  if (rsrpVals.length) {
+    rsrpVals.sort((a, b) => a - b);
+    const p10 = rsrpVals[Math.floor(rsrpVals.length * 0.10)];
+    const p50 = rsrpVals[Math.floor(rsrpVals.length * 0.50)];
+    const p90 = rsrpVals[Math.floor(rsrpVals.length * 0.90)];
+    console.log(`[CTR-Binary] RSRP decoded (n=${rsrpVals.length}): P10=${p10} P50=${p50} P90=${p90} dBm — if values look wrong, adjust RSRP Cal. Offset in the UI`);
+  }
   console.log(`[CTR-Binary] Distinct cell_ids in records (${records.length} records): [${distinctCells.join(', ')}]`);
 
   return { records, taSources, localCellOff, distinctCells };
@@ -2399,14 +2428,22 @@ function parseEricssonCTrace(text, filename) {
     let scg_failure=0, a3_trigger=0, a5_trigger=0;
 
     if (eventDesc === 'RRC_MEASUREMENT_REPORT') {
-      const rm = rowStr.match(/rsrpResult,(\d+)/);
-      if (rm) meas_rsrp_dbm = +rm[1] - 140;
-      const rqm = rowStr.match(/rsrqResult,(\d+)/);
-      if (rqm) rsrq_db = +rqm[1] / 2 - 19.5;
+      // rsrpResult: Ericsson text exports may give either raw 3GPP index (0–97, positive)
+      // or already-dBm values (negative). Auto-detect by sign.
+      const rm = rowStr.match(/rsrpResult,(-?\d+(?:\.\d+)?)/);
+      if (rm) { const v = +rm[1]; meas_rsrp_dbm = v >= 0 ? v - 140 : v; }
+      const rqm = rowStr.match(/rsrqResult,(-?\d+(?:\.\d+)?)/);
+      if (rqm) { const v = +rqm[1]; rsrq_db = v >= 0 ? v / 2 - 19.5 : v; }
 
     } else if (eventDesc === 'INTERNAL_EVENT_UE_MOBILITY_EVAL') {
-      if (kv['SERVING_RSRP'] && !isNaN(+kv['SERVING_RSRP'])) rsrp_dbm = +kv['SERVING_RSRP'] - 140;
-      if (kv['SERVING_RSRQ'] && !isNaN(+kv['SERVING_RSRQ'])) rsrq_db = +kv['SERVING_RSRQ'] / 2 - 19.5;
+      if (kv['SERVING_RSRP'] && !isNaN(+kv['SERVING_RSRP'])) {
+        const v = +kv['SERVING_RSRP'];
+        rsrp_dbm = v >= 0 ? v - 140 : v; // positive = raw 3GPP index; negative = already dBm
+      }
+      if (kv['SERVING_RSRQ'] && !isNaN(+kv['SERVING_RSRQ'])) {
+        const v = +kv['SERVING_RSRQ'];
+        rsrq_db = v >= 0 ? v / 2 - 19.5 : v;
+      }
       const trig = kv['MOBILITY_TRIGGER'] || '';
       if (trig.includes('A3')) { event_type='A3_TRIGGER'; a3_trigger=1; }
       else if (trig.includes('A5')) { event_type='A5_TRIGGER'; a5_trigger=1; }
