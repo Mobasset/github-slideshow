@@ -971,7 +971,15 @@ table.per-cell tr:hover td{background:rgba(15,52,96,.4)}
 
     <div class="sec-hdr">Geolocation Parameters</div>
     <div style="border-left:2px solid #e94560;padding-left:8px;margin-bottom:6px">
-      <div style="font-size:9px;color:#aaa;margin-bottom:5px">Per-sample placement: serving cell + TA distance + sector azimuth.<br>TA × 78.125 m when available; RSRP path-loss fallback otherwise.</div>
+      <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">Method</label>
+      <select id="geo-method" onchange="updateGeoMethodDesc()"
+              style="width:100%;background:#1a1a3e;border:1px solid #3a3a6e;color:#e0e0e0;padding:2px 4px;border-radius:3px;font-size:10px;margin-bottom:5px">
+        <option value="per-sample">Per-Sample (C-SW VDT)</option>
+        <option value="weighted-centroid">Weighted Centroid</option>
+        <option value="multilateration">Circle Intersection</option>
+        <option value="hybrid">TA + Neighbor (Hybrid)</option>
+      </select>
+      <div id="geo-method-desc" style="font-size:9px;color:#aaa;margin-bottom:5px">Per-sample: serving cell + TA distance + sector azimuth ± spread. Matches C-SW VDT pipeline exactly.</div>
       <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">Min RSRP (dBm)</label>
       <input type="number" id="geo-min-rsrp" value="-115" step="5" min="-140" max="-40"
              style="width:80px;background:#1a1a3e;border:1px solid #3a3a6e;color:#e0e0e0;padding:2px 4px;border-radius:3px;margin-bottom:4px">
@@ -1567,6 +1575,116 @@ function buildCellDb(cellMeta) {
 //   3. Direction = sector azimuth ± beamSpread° seeded by RNTI + 5-second
 //      time bucket (temporal movement within beam, stable per 5-second window)
 // No RNTI grouping, no cross-cell centroid, no triangulation.
+// ── Geolocation method description update ────────────────────────────────────
+
+function updateGeoMethodDesc() {
+  const m = document.getElementById('geo-method')?.value || 'per-sample';
+  const descs = {
+    'per-sample':       'Per-sample: serving cell + TA distance + sector azimuth ± spread. Matches C-SW VDT pipeline exactly.',
+    'weighted-centroid':'Multi-cell weighted centroid: when the same RNTI appears on 2+ cells within ±3 s, distance-weighted average of those cell positions. Falls back to per-sample for single-cell events.',
+    'multilateration':  'Circle intersection: two-cell events → exact geometric intersection of distance circles. 3+ cells → iterative least-squares. Falls back to per-sample when circles don\'t intersect.',
+    'hybrid':           'TA + Neighbor (most accurate): TA-derived radius from serving cell; nearest neighbor RSRP constrains the angular position on that ring via circle intersection.',
+  };
+  const el = document.getElementById('geo-method-desc');
+  if (el) el.textContent = descs[m] || descs['per-sample'];
+}
+
+// ── Shared geolocation helpers ────────────────────────────────────────────────
+
+// Place sample at distance d from cell in azimuth ± spread direction (per-sample baseline).
+function _geoPlacePerSample(s, cell, d, beamSpread) {
+  if (cell.az == null) {
+    s.latitude  = cell.lat;
+    s.longitude = cell.lon;
+  } else {
+    const rntiHash = s.rnti > 0
+      ? (Math.imul(s.rnti, 0x9E3779B9) >>> 0)
+      : (Math.imul(((s.timestamp_ms || 0) >>> 0) ^ (s.cell_id | 0), 0x6C62272E) >>> 0);
+    const tBucket  = (Math.floor((s.timestamp_ms || 0) / 5000) * 0x85EBCA77) >>> 0;
+    const h = (rntiHash ^ tBucket) >>> 0;
+    const frac = ((Math.imul(h, 1664525) + 1013904223) >>> 0) / 4294967296;
+    const angle_rad = (cell.az + (frac - 0.5) * beamSpread * 2) * Math.PI / 180;
+    const cosLat = Math.cos(cell.lat * Math.PI / 180);
+    s.latitude  = cell.lat + (d * Math.cos(angle_rad)) / 111111;
+    s.longitude = cell.lon + (d * Math.sin(angle_rad)) / (111111 * cosLat);
+  }
+  s._geo_synthetic = true;
+}
+
+// Estimate distance for a sample: TA (precise) or RSRP path-loss fallback.
+// Returns null if the sample fails quality gates.
+function _geoSampleDist(s, minRsrp, minDist, maxDist) {
+  const rsrp = s.rsrp_dbm ?? s.meas_rsrp_dbm;
+  if (rsrp != null && isFinite(rsrp) && rsrp < minRsrp) return null;
+  const ta = s.ta_us;
+  if (ta != null && isFinite(ta) && ta >= 1 && ta <= 1282) {
+    const d = ta * 78.125;
+    return (d < minDist || d > maxDist) ? null : d;
+  }
+  const r = (rsrp != null && isFinite(rsrp) && rsrp > -135) ? rsrp : -100;
+  return Math.max(50, Math.min(maxDist, 50 * Math.pow(10, (-r - 60) / 35)));
+}
+
+// Build RNTI → sorted-by-time sample index (for multi-cell methods).
+function _buildRntiIndex(samples) {
+  const idx = {};
+  for (const s of samples) {
+    if (!s.rnti || s.rnti === 0) continue;
+    (idx[s.rnti] || (idx[s.rnti] = [])).push(s);
+  }
+  for (const arr of Object.values(idx)) arr.sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+  return idx;
+}
+
+// Find same-RNTI peers from different cells within ±WINDOW ms.
+function _geoPeers(s, rntiIdx, WINDOW) {
+  if (!s.rnti || s.rnti === 0) return [];
+  const arr = rntiIdx[s.rnti] || [];
+  return arr.filter(p => p !== s && p.cell_id !== s.cell_id &&
+                         Math.abs(p.timestamp_ms - s.timestamp_ms) <= WINDOW);
+}
+
+// Project (lat, lon) to local ENU meters with (lat0, lon0) as origin.
+function _toLocal(lat, lon, lat0, lon0) {
+  const cosLat = Math.cos(lat0 * Math.PI / 180);
+  return { x: (lon - lon0) * 111111 * cosLat, y: (lat - lat0) * 111111 };
+}
+function _fromLocal(x, y, lat0, lon0) {
+  const cosLat = Math.cos(lat0 * Math.PI / 180);
+  return { lat: lat0 + y / 111111, lon: lon0 + x / (111111 * cosLat) };
+}
+
+// Two-circle intersection: circle A at origin (0,0) radius rA, circle B at (bx,by) radius rB.
+// Returns array of up to 2 {x,y} intersection points, or null if circles don't meet.
+function _circleIntersect2(bx, by, rA, rB) {
+  const D = Math.sqrt(bx * bx + by * by);
+  if (D < 1) return null;
+  if (D > rA + rB + 50 || D < Math.abs(rA - rB) - 50) return null;
+  const a  = (rA * rA - rB * rB + D * D) / (2 * D);
+  const h2 = rA * rA - a * a;
+  if (h2 < 0) return null;
+  const h  = Math.sqrt(Math.max(0, h2));
+  const mx = a * bx / D, my = a * by / D;
+  if (h < 0.1) return [{ x: mx, y: my }]; // tangent — single point
+  return [
+    { x: mx + h * by / D, y: my - h * bx / D },
+    { x: mx - h * by / D, y: my + h * bx / D },
+  ];
+}
+
+// Pick the intersection point best aligned with cell A's sector beam.
+function _pickIntersect(pts, cellA) {
+  if (!pts || !pts.length) return null;
+  if (pts.length === 1 || cellA.az == null) return pts[0];
+  const az = cellA.az * Math.PI / 180;
+  const ex = Math.sin(az), ey = Math.cos(az); // expected direction
+  const d0 = pts[0].x * ex + pts[0].y * ey;
+  const d1 = pts[1].x * ex + pts[1].y * ey;
+  return d0 >= d1 ? pts[0] : pts[1];
+}
+
+// ── Geolocation methods ───────────────────────────────────────────────────────
+
 function applyVdtLocalization(samples, cellDb, opts = {}) {
   const beamSpread = opts.beamSpread ?? 30;
   const minRsrp    = opts.minRsrp    ?? -115;
@@ -1582,50 +1700,206 @@ function applyVdtLocalization(samples, cellDb, opts = {}) {
   let placed = 0, skipRsrp = 0, skipDist = 0, noCell = 0;
 
   for (const s of samples) {
-    if (s.latitude != null) continue;  // GPS or already positioned
-
+    if (s.latitude != null) continue;
     const cell = cellDb[String(s.cell_id)];
     if (!cell) { noCell++; continue; }
-
-    const rsrp = s.rsrp_dbm ?? s.meas_rsrp_dbm;
-
-    // Quality gate: exclude samples below noise floor
-    if (rsrp != null && isFinite(rsrp) && rsrp < minRsrp) { skipRsrp++; continue; }
-
-    // Distance
-    const ta = s.ta_us;
-    let d;
-    if (ta != null && isFinite(ta) && ta >= 1 && ta <= 1282) {
-      d = ta * 78.125;
-      if (d < minDist || d > maxDist) { skipDist++; continue; }
-    } else {
-      const r = (rsrp != null && isFinite(rsrp) && rsrp > -135) ? rsrp : -100;
-      d = 50 * Math.pow(10, (-r - 60) / 35);
+    const d = _geoSampleDist(s, minRsrp, minDist, maxDist);
+    if (d == null) {
+      const rsrp = s.rsrp_dbm ?? s.meas_rsrp_dbm;
+      if (rsrp != null && isFinite(rsrp) && rsrp < minRsrp) skipRsrp++;
+      else skipDist++;
+      continue;
     }
-    d = Math.max(50, Math.min(maxDist, d));
-
-    if (cell.az == null) {
-      s.latitude  = cell.lat;
-      s.longitude = cell.lon;
-    } else {
-      // Direction: RNTI identity XOR'd with 5-second time bucket
-      const rntiHash = s.rnti > 0
-        ? (Math.imul(s.rnti, 0x9E3779B9) >>> 0)
-        : (Math.imul(((s.timestamp_ms || 0) >>> 0) ^ (s.cell_id | 0), 0x6C62272E) >>> 0);
-      const tBucket  = (Math.floor((s.timestamp_ms || 0) / 5000) * 0x85EBCA77) >>> 0;
-      const h = (rntiHash ^ tBucket) >>> 0;
-      const frac = ((Math.imul(h, 1664525) + 1013904223) >>> 0) / 4294967296;
-      const angle_rad = (cell.az + (frac - 0.5) * beamSpread * 2) * Math.PI / 180;
-      const cosLat = Math.cos(cell.lat * Math.PI / 180);
-      s.latitude  = cell.lat + (d * Math.cos(angle_rad)) / 111111;
-      s.longitude = cell.lon + (d * Math.sin(angle_rad)) / (111111 * cosLat);
-    }
-    s._geo_synthetic = true;
+    _geoPlacePerSample(s, cell, d, beamSpread);
     placed++;
   }
 
   console.log(`[VDT-Loc] placed=${placed} skipRsrp=${skipRsrp} skipDist=${skipDist} noCell=${noCell}`);
   return samples;
+}
+
+// Mode A — distance-weighted centroid of same-RNTI multi-cell positions.
+function applyWeightedCentroidLocalization(samples, cellDb, opts = {}) {
+  const beamSpread = opts.beamSpread ?? 30;
+  const minRsrp    = opts.minRsrp    ?? -115;
+  const minDist    = opts.minDist    ?? 0;
+  const maxDist    = opts.maxDist    ?? 2500;
+  const WINDOW     = 3000;
+
+  const rntiIdx = _buildRntiIndex(samples);
+  let placed = 0, fallback = 0, noCell = 0;
+
+  for (const s of samples) {
+    if (s.latitude != null) continue;
+    const cellA = cellDb[String(s.cell_id)];
+    if (!cellA) { noCell++; continue; }
+
+    const dA = _geoSampleDist(s, minRsrp, minDist, maxDist);
+    if (dA == null) continue;
+
+    const refs = [{ cell: cellA, d: dA }];
+    for (const p of _geoPeers(s, rntiIdx, WINDOW)) {
+      const pc = cellDb[String(p.cell_id)];
+      if (!pc) continue;
+      const dp = _geoSampleDist(p, minRsrp, minDist, maxDist);
+      if (dp != null) refs.push({ cell: pc, d: dp });
+    }
+
+    if (refs.length === 1) {
+      _geoPlacePerSample(s, cellA, dA, beamSpread);
+      fallback++;
+    } else {
+      // Weight = 1/d  (closer cell pulls centroid toward it)
+      let wLat = 0, wLon = 0, wSum = 0;
+      for (const r of refs) { const w = 1 / r.d; wLat += r.cell.lat * w; wLon += r.cell.lon * w; wSum += w; }
+      s.latitude  = wLat / wSum;
+      s.longitude = wLon / wSum;
+      s._geo_synthetic = true;
+      s._geo_method = 'centroid';
+      placed++;
+    }
+  }
+  console.log(`[Centroid] placed=${placed} fallback(per-sample)=${fallback} noCell=${noCell}`);
+  return samples;
+}
+
+// Mode B — circle intersection (2 cells) / iterative least-squares (3+ cells).
+function applyMultilaterationLocalization(samples, cellDb, opts = {}) {
+  const beamSpread = opts.beamSpread ?? 30;
+  const minRsrp    = opts.minRsrp    ?? -115;
+  const minDist    = opts.minDist    ?? 0;
+  const maxDist    = opts.maxDist    ?? 2500;
+  const WINDOW     = 4000;
+
+  const rntiIdx = _buildRntiIndex(samples);
+  let placed2 = 0, placedN = 0, fallback = 0, noCell = 0;
+
+  for (const s of samples) {
+    if (s.latitude != null) continue;
+    const cellA = cellDb[String(s.cell_id)];
+    if (!cellA) { noCell++; continue; }
+
+    const dA = _geoSampleDist(s, minRsrp, minDist, maxDist);
+    if (dA == null) continue;
+
+    const refs = [{ cell: cellA, d: dA }];
+    for (const p of _geoPeers(s, rntiIdx, WINDOW)) {
+      const pc = cellDb[String(p.cell_id)];
+      if (!pc) continue;
+      const dp = _geoSampleDist(p, minRsrp, minDist, maxDist);
+      if (dp != null) refs.push({ cell: pc, d: dp });
+    }
+
+    if (refs.length === 1) { _geoPlacePerSample(s, cellA, dA, beamSpread); fallback++; continue; }
+
+    const lat0 = cellA.lat, lon0 = cellA.lon;
+
+    if (refs.length === 2) {
+      const nb = toENU(refs[1].cell, lat0, lon0);
+      const pts = _circleIntersect2(nb.x, nb.y, refs[0].d, refs[1].d);
+      const pt  = _pickIntersect(pts, cellA);
+      if (pt) {
+        const g = _fromLocal(pt.x, pt.y, lat0, lon0);
+        s.latitude = g.lat; s.longitude = g.lon;
+        s._geo_synthetic = true; s._geo_method = 'trilateration-2';
+        placed2++;
+      } else { _geoPlacePerSample(s, cellA, dA, beamSpread); fallback++; }
+    } else {
+      // 3+ circles: gradient-descent least-squares in local ENU
+      const lrefs = refs.map(r => ({ ...toENU(r.cell, lat0, lon0), d: r.d }));
+      lrefs[0].x = 0; lrefs[0].y = 0; // cell A is origin
+      let x = 0, y = 0, wSum = 0;
+      for (const r of lrefs) { const w = 1/r.d; x += r.x*w; y += r.y*w; wSum += w; }
+      x /= wSum; y /= wSum;
+      for (let iter = 0; iter < 40; iter++) {
+        let gx = 0, gy = 0;
+        for (const r of lrefs) {
+          const dx = x - r.x, dy = y - r.y;
+          const dist = Math.sqrt(dx*dx + dy*dy) || 0.1;
+          const err = dist - r.d;
+          gx += err * dx / dist; gy += err * dy / dist;
+        }
+        x -= 0.3 * gx / lrefs.length;
+        y -= 0.3 * gy / lrefs.length;
+      }
+      const g = _fromLocal(x, y, lat0, lon0);
+      s.latitude = g.lat; s.longitude = g.lon;
+      s._geo_synthetic = true; s._geo_method = 'multilateration-N';
+      placedN++;
+    }
+  }
+  console.log(`[Multilat] 2-circle=${placed2} N-cell=${placedN} fallback=${fallback} noCell=${noCell}`);
+  return samples;
+}
+
+// Mode C — TA ring from serving cell + neighbor RSRP constrains angle via circle intersection.
+function applyHybridTaNeighborLocalization(samples, cellDb, opts = {}) {
+  const beamSpread = opts.beamSpread ?? 30;
+  const minRsrp    = opts.minRsrp    ?? -115;
+  const minDist    = opts.minDist    ?? 0;
+  const maxDist    = opts.maxDist    ?? 2500;
+  const WINDOW     = 5000;
+
+  const rntiIdx = _buildRntiIndex(samples);
+  let placedHybrid = 0, fallback = 0, noCell = 0;
+
+  for (const s of samples) {
+    if (s.latitude != null) continue;
+    const cellA = cellDb[String(s.cell_id)];
+    if (!cellA) { noCell++; continue; }
+
+    // Hybrid requires TA for the serving cell ring (radius) — fall back if absent
+    const ta = s.ta_us;
+    const dA = (ta != null && isFinite(ta) && ta >= 1 && ta <= 1282)
+      ? ta * 78.125 : null;
+
+    if (dA == null || dA < minDist || dA > maxDist) {
+      // No TA: use per-sample with RSRP fallback
+      const d = _geoSampleDist(s, minRsrp, minDist, maxDist);
+      if (d != null) { _geoPlacePerSample(s, cellA, d, beamSpread); fallback++; }
+      continue;
+    }
+
+    // Find the closest-in-time neighbor peer with a usable distance estimate
+    const peers = _geoPeers(s, rntiIdx, WINDOW);
+    let best = null, bestDt = Infinity;
+    for (const p of peers) {
+      const pc = cellDb[String(p.cell_id)];
+      if (!pc) continue;
+      const dp = _geoSampleDist(p, minRsrp, minDist, maxDist);
+      if (dp == null) continue;
+      const dt = Math.abs(p.timestamp_ms - s.timestamp_ms);
+      if (dt < bestDt) { bestDt = dt; best = { cell: pc, d: dp }; }
+    }
+
+    if (!best) { _geoPlacePerSample(s, cellA, dA, beamSpread); fallback++; continue; }
+
+    const lat0 = cellA.lat, lon0 = cellA.lon;
+    const nb = toENU(best.cell, lat0, lon0);
+    const pts = _circleIntersect2(nb.x, nb.y, dA, best.d);
+    const pt  = _pickIntersect(pts, cellA);
+
+    if (pt) {
+      const g = _fromLocal(pt.x, pt.y, lat0, lon0);
+      s.latitude = g.lat; s.longitude = g.lon;
+      s._geo_synthetic = true; s._geo_method = 'hybrid-ta-nb';
+      placedHybrid++;
+    } else { _geoPlacePerSample(s, cellA, dA, beamSpread); fallback++; }
+  }
+  console.log(`[Hybrid] placed=${placedHybrid} fallback=${fallback} noCell=${noCell}`);
+  return samples;
+}
+
+// Tiny alias used inside multilat/hybrid (same as _toLocal but shorter name in inner loop).
+function toENU(cell, lat0, lon0) { return _toLocal(cell.lat, cell.lon, lat0, lon0); }
+
+// Dispatch to the method selected in the UI (or default per-sample).
+function applyGeoLocalization(samples, cellDb, opts = {}) {
+  const method = document.getElementById('geo-method')?.value || 'per-sample';
+  if      (method === 'weighted-centroid') return applyWeightedCentroidLocalization(samples, cellDb, opts);
+  else if (method === 'multilateration')   return applyMultilaterationLocalization(samples, cellDb, opts);
+  else if (method === 'hybrid')            return applyHybridTaNeighborLocalization(samples, cellDb, opts);
+  else                                     return applyVdtLocalization(samples, cellDb, opts);
 }
 
 // ── TA byte-offset auto-discovery ────────────────────────────────────────────
@@ -1874,14 +2148,15 @@ function reGeolocate() {
       minDist:    parseFloat(document.getElementById('geo-min-dist')?.value)    ?? 0,
       maxDist:    parseFloat(document.getElementById('geo-max-dist')?.value)    ?? 2500,
     };
-    applyVdtLocalization(state.samples, state.cellDb, opts);
+    applyGeoLocalization(state.samples, state.cellDb, opts);
   }
 
   state.samples.forEach(enrichSample);
   state.filtered = applyFilters(state.samples);
 
   const posCount = state.samples.filter(s => s.latitude != null).length;
-  setStatus(`Geolocation: ${posCount.toLocaleString()} / ${state.samples.length.toLocaleString()} samples positioned`);
+  const method = document.getElementById('geo-method')?.value || 'per-sample';
+  setStatus(`Geolocation [${method}]: ${posCount.toLocaleString()} / ${state.samples.length.toLocaleString()} samples positioned`);
 
   renderAll();
   renderTimeline(state.filtered);
@@ -2726,7 +3001,8 @@ function buildTooltip(s) {
   const rsrpLine = rsrpMeas
     ? `RSRP(srv): <b>${rsrpSrv}</b> | RSRP(meas): ${rsrpMeas}`
     : `RSRP: <b>${rsrpSrv}</b>`;
-  return `<b>${new Date(s.timestamp_ms).toISOString().slice(11,19)} UTC</b><br>` +
+  const geoTag = s._geo_method ? ` <span style="color:#aaa;font-size:9px">[${s._geo_method}]</span>` : '';
+  return `<b>${new Date(s.timestamp_ms).toISOString().slice(11,19)} UTC</b>${geoTag}<br>` +
     `${rsrpLine} | RSRQ: ${fmt(s.rsrq_db)} dB<br>` +
     `SINR: ${fmt(s.sinr_db)} dB | CQI: ${s.cqi??'—'}<br>` +
     `Cell: ${s.cell_id} | PCI: ${s.pci}<br>` +
@@ -3216,7 +3492,7 @@ async function processFiles() {
         msgs.push(`Cell match: ${matchedCids.length}/${traceCids.length} cells matched DB (trace: [${traceCids.slice(0,4).join(',')}] DB: [${Object.keys(state.cellDb).slice(0,4).join(',')}])`);
         if (matchedCids.length === 0)
           msgs.push(`⚠ No cell IDs match between trace and DB — check eNB ID format in DB.csv`);
-        applyVdtLocalization(parsed, state.cellDb);
+        applyGeoLocalization(parsed, state.cellDb);
       }
       parsed.forEach(enrichSample);
       newSamples = newSamples.concat(parsed);
