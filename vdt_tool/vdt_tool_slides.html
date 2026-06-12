@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VDT Tool – Technical Overview</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    height: 100vh;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  /* ── Slide container ── */
+  #deck {
+    width: 100vw; height: 100vh;
+    position: relative;
+  }
+
+  .slide {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    justify-content: center; align-items: center;
+    padding: 48px 80px;
+    opacity: 0;
+    transform: translateX(60px);
+    transition: opacity .4s ease, transform .4s ease;
+    pointer-events: none;
+  }
+  .slide.active {
+    opacity: 1; transform: translateX(0);
+    pointer-events: all;
+  }
+  .slide.exit {
+    opacity: 0; transform: translateX(-60px);
+  }
+
+  /* ── Typography ── */
+  .slide-title {
+    font-size: 2rem; font-weight: 700;
+    color: #e94560;
+    margin-bottom: 6px;
+    letter-spacing: -.5px;
+  }
+  .slide-subtitle {
+    font-size: 1.05rem; color: #8b949e;
+    margin-bottom: 32px;
+  }
+  .slide-body {
+    width: 100%; max-width: 900px;
+  }
+
+  /* ── Title slide ── */
+  .title-main {
+    font-size: 3rem; font-weight: 800;
+    color: #e94560;
+    text-align: center;
+    line-height: 1.1;
+  }
+  .title-sub {
+    font-size: 1.2rem; color: #8b949e;
+    text-align: center;
+    margin-top: 14px;
+  }
+  .title-badge {
+    margin-top: 28px;
+    display: flex; gap: 12px; flex-wrap: wrap; justify-content: center;
+  }
+  .badge {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 20px;
+    padding: 6px 16px;
+    font-size: .82rem;
+    color: #58a6ff;
+  }
+
+  /* ── Cards ── */
+  .cards {
+    display: grid;
+    gap: 16px;
+    width: 100%;
+  }
+  .cards.cols-2 { grid-template-columns: 1fr 1fr; }
+  .cards.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .cards.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .card-icon { font-size: 1.6rem; margin-bottom: 8px; }
+  .card-title {
+    font-size: .9rem; font-weight: 700;
+    color: #e94560;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .card p { font-size: .82rem; color: #8b949e; line-height: 1.55; }
+
+  /* ── Pipeline ── */
+  .pipeline {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: nowrap;
+    width: 100%;
+    overflow-x: auto;
+  }
+  .pipe-step {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 14px 16px;
+    flex: 1;
+    min-width: 110px;
+    text-align: center;
+  }
+  .pipe-step .pipe-icon { font-size: 1.4rem; }
+  .pipe-step .pipe-label {
+    font-size: .72rem; font-weight: 700;
+    color: #e94560;
+    margin-top: 5px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .pipe-step .pipe-desc {
+    font-size: .68rem; color: #8b949e;
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .pipe-arrow {
+    font-size: 1.4rem; color: #30363d;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+
+  /* ── Table ── */
+  table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+  th {
+    background: #161b22;
+    color: #e94560;
+    padding: 9px 14px;
+    text-align: left;
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    border-bottom: 2px solid #30363d;
+  }
+  td { padding: 9px 14px; border-bottom: 1px solid #21262d; color: #c9d1d9; }
+  tr:hover td { background: #161b22; }
+
+  /* ── Code ── */
+  .code-block {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 16px 20px;
+    font-family: 'Courier New', monospace;
+    font-size: .78rem;
+    color: #c9d1d9;
+    line-height: 1.6;
+    width: 100%;
+  }
+  .code-block .kw  { color: #ff7b72; }
+  .code-block .fn  { color: #d2a8ff; }
+  .code-block .str { color: #a5d6ff; }
+  .code-block .cm  { color: #8b949e; font-style: italic; }
+  .code-block .num { color: #79c0ff; }
+
+  /* ── Diagram boxes ── */
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+  }
+  .diag-row {
+    display: flex;
+    gap: 10px;
+    align-items: stretch;
+  }
+  .diag-box {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px 16px;
+    flex: 1;
+  }
+  .diag-box.accent { border-color: #e94560; }
+  .diag-box.blue   { border-color: #58a6ff; }
+  .diag-box.green  { border-color: #3fb950; }
+  .diag-box .db-title {
+    font-size: .75rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .5px;
+    margin-bottom: 6px;
+  }
+  .diag-box.accent .db-title { color: #e94560; }
+  .diag-box.blue   .db-title { color: #58a6ff; }
+  .diag-box.green  .db-title { color: #3fb950; }
+  .diag-box p { font-size: .75rem; color: #8b949e; line-height: 1.45; }
+
+  /* ── RSRP visual ── */
+  .rsrp-bar-wrap { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+  .rsrp-bar-row { display: flex; align-items: center; gap: 10px; font-size: .78rem; }
+  .rsrp-label { width: 160px; color: #8b949e; flex-shrink: 0; }
+  .rsrp-bar-track { flex: 1; height: 22px; background: #21262d; border-radius: 4px; overflow: hidden; position: relative; }
+  .rsrp-bar-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 8px; font-size: .7rem; font-weight: 700; color: #fff; }
+  .rsrp-note { font-size: .7rem; color: #8b949e; flex-shrink: 0; width: 180px; }
+
+  /* ── Highlight list ── */
+  .hlist { list-style: none; display: flex; flex-direction: column; gap: 10px; width: 100%; }
+  .hlist li {
+    display: flex; align-items: flex-start; gap: 12px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: .83rem;
+    color: #c9d1d9;
+    line-height: 1.5;
+  }
+  .hlist li .hl-icon { font-size: 1.1rem; flex-shrink: 0; margin-top: 1px; }
+  .hlist li strong { color: #e94560; }
+
+  /* ── Navigation ── */
+  #nav {
+    position: fixed;
+    bottom: 28px; left: 50%;
+    transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 30px;
+    padding: 8px 18px;
+    z-index: 100;
+  }
+  #nav button {
+    background: none; border: none;
+    color: #8b949e; cursor: pointer;
+    font-size: 1.1rem;
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .2s, color .2s;
+  }
+  #nav button:hover { background: #21262d; color: #e6edf3; }
+  #nav button:disabled { opacity: .3; cursor: default; }
+  #slide-counter { font-size: .78rem; color: #8b949e; min-width: 50px; text-align: center; }
+
+  .dots {
+    display: flex; gap: 6px;
+  }
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #30363d;
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .dot.on { background: #e94560; }
+
+  /* ── Progress bar ── */
+  #progress {
+    position: fixed; top: 0; left: 0;
+    height: 3px;
+    background: #e94560;
+    transition: width .4s ease;
+    z-index: 200;
+  }
+
+  /* ── Slide number label ── */
+  #slide-label {
+    position: fixed; top: 18px; right: 28px;
+    font-size: .72rem; color: #30363d;
+  }
+
+  /* ── Section label top-left ── */
+  .slide-section {
+    position: absolute;
+    top: 22px; left: 36px;
+    font-size: .68rem;
+    color: #30363d;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  /* geo diagram */
+  .geo-wrap {
+    display: flex; gap: 20px; width: 100%; align-items: flex-start;
+  }
+  .geo-left { flex: 1; }
+  .geo-right { flex: 0 0 240px; }
+  .antenna-svg { width: 220px; height: 200px; }
+
+  .two-col { display: flex; gap: 24px; width: 100%; align-items: flex-start; }
+  .two-col > * { flex: 1; }
+
+  /* color legend strip */
+  .color-strip {
+    display: flex; border-radius: 6px; overflow: hidden;
+    height: 28px; width: 100%; margin: 12px 0;
+  }
+  .cs-seg {
+    flex: 1; display: flex; align-items: center;
+    justify-content: center;
+    font-size: .62rem; font-weight: 700; color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,.6);
+  }
+</style>
+</head>
+<body>
+
+<div id="progress"></div>
+<div id="slide-label"></div>
+
+<div id="deck">
+
+  <!-- ═══ SLIDE 1 — Title ═══ -->
+  <div class="slide active" data-section="">
+    <div style="text-align:center">
+      <div style="font-size:3.2rem;font-weight:800;color:#e94560;line-height:1">VDT Tool</div>
+      <div style="font-size:1.5rem;font-weight:300;color:#8b949e;margin-top:8px">Virtual Drive Test — Technical Overview</div>
+      <div style="margin-top:24px;font-size:.9rem;color:#58a6ff">Ericsson LTE Cell Trace → Geolocated RF Raster</div>
+      <div class="title-badge">
+        <span class="badge">Single HTML file</span>
+        <span class="badge">No server required</span>
+        <span class="badge">Ericsson CTR Binary + Text</span>
+        <span class="badge">C-SW VDT-accurate pipeline</span>
+        <span class="badge">GPS / TA / RSRP geolocation</span>
+      </div>
+      <div style="margin-top:36px;color:#30363d;font-size:.8rem">Press → or click ▶ to navigate</div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 2 — What it does ═══ -->
+  <div class="slide" data-section="Overview">
+    <div class="slide-section">Overview</div>
+    <div class="slide-title">What is the VDT Tool?</div>
+    <div class="slide-subtitle">A browser-based RF post-processing and visualization tool — no installation needed</div>
+    <div class="slide-body">
+      <div class="cards cols-3">
+        <div class="card">
+          <div class="card-icon">📡</div>
+          <div class="card-title">Parse</div>
+          <p>Decode Ericsson Cell Trace (CTR) binary and text files. Extract RSRP, RSRQ, SINR, TA, HO events per UE per cell.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">📍</div>
+          <div class="card-title">Geolocate</div>
+          <p>Place each sample on the map using serving cell coordinates + Timing Advance distance + sector azimuth spread.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🗺️</div>
+          <div class="card-title">Visualize</div>
+          <p>Aggregate samples onto a fixed geographic raster. Display as colored dots, heatmap, or per-pixel median/avg/max.</p>
+        </div>
+      </div>
+      <div style="margin-top:16px" class="cards cols-2">
+        <div class="card">
+          <div class="card-icon">📊</div>
+          <div class="card-title">KPIs</div>
+          <p>Handover success rate, RLF rate, RSRP/RSRQ/SINR percentiles, per-cell breakdown table, timeline chart.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">💾</div>
+          <div class="card-title">Export</div>
+          <p>Download filtered samples as CSV, GeoJSON, or KMZ for Google Earth / QGIS post-processing.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 3 — Pipeline ═══ -->
+  <div class="slide" data-section="Architecture">
+    <div class="slide-section">Architecture</div>
+    <div class="slide-title">Processing Pipeline</div>
+    <div class="slide-subtitle">From raw trace files to interactive raster map</div>
+    <div class="slide-body">
+      <div class="pipeline">
+        <div class="pipe-step">
+          <div class="pipe-icon">📁</div>
+          <div class="pipe-label">Input Files</div>
+          <div class="pipe-desc">CTR binary<br>CTR text<br>GPS track<br>Cell DB.csv</div>
+        </div>
+        <div class="pipe-arrow">›</div>
+        <div class="pipe-step">
+          <div class="pipe-icon">🔍</div>
+          <div class="pipe-label">Parse</div>
+          <div class="pipe-desc">TLV decode<br>Event extract<br>RSRP/RSRQ/TA<br>per event</div>
+        </div>
+        <div class="pipe-arrow">›</div>
+        <div class="pipe-step">
+          <div class="pipe-icon">🔗</div>
+          <div class="pipe-label">Enrich</div>
+          <div class="pipe-desc">TA propagation<br>Serving RSRP<br>GPS correlation<br>±2–5 s window</div>
+        </div>
+        <div class="pipe-arrow">›</div>
+        <div class="pipe-step">
+          <div class="pipe-icon">📍</div>
+          <div class="pipe-label">Geolocate</div>
+          <div class="pipe-desc">Per-sample<br>cell + TA dist<br>+ azimuth<br>± spread</div>
+        </div>
+        <div class="pipe-arrow">›</div>
+        <div class="pipe-step">
+          <div class="pipe-icon">🟦</div>
+          <div class="pipe-label">Raster</div>
+          <div class="pipe-desc">Snap to grid<br>Aggregate<br>median/avg/<br>max per pixel</div>
+        </div>
+        <div class="pipe-arrow">›</div>
+        <div class="pipe-step">
+          <div class="pipe-icon">🗺️</div>
+          <div class="pipe-label">Render</div>
+          <div class="pipe-desc">Leaflet map<br>Dot / Raster<br>Heatmap<br>Cluster</div>
+        </div>
+      </div>
+      <div style="margin-top:22px" class="diagram">
+        <div class="diag-row">
+          <div class="diag-box accent">
+            <div class="db-title">State</div>
+            <p><code>state.rawSamples</code> — immutable snapshot after parse<br>
+               <code>state.samples</code> — working copy with geolocation applied<br>
+               <code>state.filtered</code> — after UI filters (time, cell, metric threshold)</p>
+          </div>
+          <div class="diag-box blue">
+            <div class="db-title">Re-geolocation</div>
+            <p>Any change to geo params (TA min/max, RSRP threshold, beam spread, pixel size) triggers <code>reGeolocate()</code> which resets from <code>rawSamples</code> and re-runs the full enrichment + placement pipeline.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 4 — Input files ═══ -->
+  <div class="slide" data-section="Inputs">
+    <div class="slide-section">Inputs</div>
+    <div class="slide-title">Supported Input Files</div>
+    <div class="slide-subtitle">Drag-and-drop multiple files simultaneously</div>
+    <div class="slide-body">
+      <table>
+        <thead>
+          <tr><th>File Type</th><th>Format</th><th>Extracts</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CTR Binary</td>
+            <td>.bin / no ext</td>
+            <td>RSRP, RSRQ, SINR, RNTI, TA (0x10 events), HO, RLF</td>
+            <td>Ericsson TLV: 2-byte length BE, 1-byte pad, 1-byte type</td>
+          </tr>
+          <tr>
+            <td>CTR Text</td>
+            <td>.log / .txt / .csv</td>
+            <td>Same events in column-delimited form, TA from PROC records</td>
+            <td>eNB-ID × 1000 + local-cell = Cell ID</td>
+          </tr>
+          <tr>
+            <td>Cell DB</td>
+            <td>DB.csv</td>
+            <td>Cell site lat/lon, azimuth, height, cell ID</td>
+            <td>Required for geolocation; supports eNB/sector naming</td>
+          </tr>
+          <tr>
+            <td>GPS Track</td>
+            <td>.csv / .gpx / .kml</td>
+            <td>Timestamped lat/lon ground truth</td>
+            <td>Correlated to samples within ±500 ms</td>
+          </tr>
+          <tr>
+            <td>L3 RRC Log</td>
+            <td>.txt / .log</td>
+            <td>PCI, EARFCN, RSRP from RRC messages</td>
+            <td>Regex-parsed RRC text logs</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 5 — Events decoded ═══ -->
+  <div class="slide" data-section="Parsing">
+    <div class="slide-section">Parsing</div>
+    <div class="slide-title">CTR Events Decoded</div>
+    <div class="slide-subtitle">Ericsson Cell Trace event types and payload offsets</div>
+    <div class="slide-body">
+      <table>
+        <thead>
+          <tr><th>Event ID</th><th>Name</th><th>Key Payload</th><th>Use</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="color:#58a6ff;font-weight:700">0x49</td>
+            <td>INTERNAL_EVENT_UE_MOBILITY_EVAL</td>
+            <td>Bytes 48–50: RSRP, RSRQ, SINR (raw − 140)</td>
+            <td><strong style="color:#3fb950">Serving-cell RSRP → rsrp_dbm</strong></td>
+          </tr>
+          <tr>
+            <td style="color:#ff7b72;font-weight:700">0x0b</td>
+            <td>RRC_MEASUREMENT_REPORT</td>
+            <td>Word at offset 42: bits 8–14 = RSRP, bits 2–7 = RSRQ</td>
+            <td><strong style="color:#ffa657">Triggered/neighbour RSRP → meas_rsrp_dbm</strong></td>
+          </tr>
+          <tr>
+            <td style="color:#8b949e;font-weight:700">0x10</td>
+            <td>INTERNAL_PROC_HO_EXEC_X2_OUT</td>
+            <td>Offset 98, u16BE: TA raw (÷16 = TA-cmd units)</td>
+            <td>TA source — propagated ±2 s same cell to all events</td>
+          </tr>
+          <tr>
+            <td style="color:#8b949e;font-weight:700">0x1e/1f</td>
+            <td>RRC_RLF / Re-establishment</td>
+            <td>Event flags</td>
+            <td>RLF counter</td>
+          </tr>
+          <tr>
+            <td style="color:#8b949e;font-weight:700">0x34</td>
+            <td>NR_SCG_FAILURE</td>
+            <td>Event flags</td>
+            <td>SCG failure counter</td>
+          </tr>
+          <tr>
+            <td style="color:#8b949e;font-weight:700">0x03</td>
+            <td>INTERNAL_PER_RADIO_UE_MEASUREMENT</td>
+            <td>SINR histogram bins, CQI</td>
+            <td>Per-radio SINR / CQI</td>
+          </tr>
+        </tbody>
+      </table>
+      <div style="margin-top:14px;font-size:.75rem;color:#8b949e;background:#161b22;border-radius:6px;padding:10px 14px;border:1px solid #30363d">
+        <strong style="color:#e94560">Cell ID formula:</strong>
+        &nbsp;<code>cell_id = eNB_ID × 1000 + local_cell_id</code>
+        &nbsp;·&nbsp;
+        <strong style="color:#e94560">TA distance:</strong>
+        &nbsp;<code>TA_cmd × 78.125 m/step</code>
+        &nbsp;·&nbsp;
+        <strong style="color:#e94560">RSRP raw:</strong>
+        &nbsp;<code>raw_byte − 140 = dBm</code>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 6 — RSRP fields ═══ -->
+  <div class="slide" data-section="RSRP">
+    <div class="slide-section">RSRP</div>
+    <div class="slide-title">Two Separate RSRP Fields</div>
+    <div class="slide-subtitle">0x49 serving-cell RSRP vs 0x0b measurement-report RSRP are fundamentally different</div>
+    <div class="slide-body">
+      <div class="two-col">
+        <div>
+          <div class="diag-box accent" style="margin-bottom:12px">
+            <div class="db-title">rsrp_dbm — Serving Cell RSRP</div>
+            <p>Source: <strong style="color:#fff">0x49 INTERNAL_EVENT_UE_MOBILITY_EVAL</strong><br>
+            Reflects the UE's actual serving cell signal strength at the mobility evaluation point.<br>
+            <strong style="color:#3fb950">Unbiased — best for raster coverage maps.</strong></p>
+          </div>
+          <div class="diag-box blue">
+            <div class="db-title">meas_rsrp_dbm — Meas. Report RSRP</div>
+            <p>Source: <strong style="color:#fff">0x0b RRC_MEASUREMENT_REPORT</strong><br>
+            Triggered only when RSRP crosses an A3/A5 threshold — i.e. when the signal is already degraded.<br>
+            <strong style="color:#ffa657">Biased weak — skews histogram toward poor values.</strong></p>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:.78rem;color:#8b949e;margin-bottom:10px">Typical distribution difference:</div>
+          <div class="rsrp-bar-wrap">
+            <div class="rsrp-bar-row">
+              <div class="rsrp-label">rsrp_dbm (serving)</div>
+              <div class="rsrp-bar-track">
+                <div class="rsrp-bar-fill" style="width:75%;background:linear-gradient(90deg,#1a7f37,#3fb950)">–80 to –95 dBm</div>
+              </div>
+            </div>
+            <div class="rsrp-bar-row">
+              <div class="rsrp-label">meas_rsrp_dbm</div>
+              <div class="rsrp-bar-track">
+                <div class="rsrp-bar-fill" style="width:45%;background:linear-gradient(90deg,#b45309,#ffa657)">–100 to –115 dBm</div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:18px" class="diag-box green">
+            <div class="db-title">enrichSamplesWithServingRsrp()</div>
+            <p>Propagates 0x49 serving RSRP onto nearby 0x0b records within ±5 s, same cell, RNTI-priority matching. Fills <code>rsrp_dbm</code> on measurement-report events so geolocation uses a reliable distance estimate.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 7 — Geolocation ═══ -->
+  <div class="slide" data-section="Geolocation">
+    <div class="slide-section">Geolocation</div>
+    <div class="slide-title">Per-Sample Geolocation (C-SW VDT)</div>
+    <div class="slide-subtitle">applyVdtLocalization() — matches the C-SW VDT raster engine exactly</div>
+    <div class="slide-body">
+      <div class="geo-wrap">
+        <div class="geo-left">
+          <ul class="hlist">
+            <li>
+              <span class="hl-icon">1️⃣</span>
+              <span><strong>Serving cell anchor</strong> — each sample starts at its serving cell's lat/lon from the Cell DB.</span>
+            </li>
+            <li>
+              <span class="hl-icon">2️⃣</span>
+              <span><strong>Distance from TA</strong> — Timing Advance (TA-cmd × 78.125 m) gives radial distance when available (0x10 events, ±2 s propagation).</span>
+            </li>
+            <li>
+              <span class="hl-icon">3️⃣</span>
+              <span><strong>RSRP path-loss fallback</strong> — when no TA: <code>d = 50 × 10^((−RSRP − 60) / 35)</code> m. Gives ≈180 m at −80 dBm, ≈1340 m at −110 dBm.</span>
+            </li>
+            <li>
+              <span class="hl-icon">4️⃣</span>
+              <span><strong>Direction = azimuth ± spread</strong> — RNTI hash XOR'd with 5-second time-bucket gives a stable-but-varying angle within the beam. Eliminates single-ray clustering.</span>
+            </li>
+          </ul>
+          <div style="margin-top:12px;font-size:.72rem;color:#8b949e;background:#161b22;padding:10px 14px;border-radius:6px;border:1px solid #30363d">
+            ✗ No RNTI grouping &nbsp;·&nbsp; ✗ No cross-cell centroid &nbsp;·&nbsp; ✗ No triangulation<br>
+            ✓ One independent placement per event — identical to C-SW VDT pipeline
+          </div>
+        </div>
+        <div class="geo-right">
+          <svg class="antenna-svg" viewBox="0 0 220 200">
+            <!-- Cell tower -->
+            <line x1="110" y1="30" x2="110" y2="90" stroke="#e94560" stroke-width="2"/>
+            <polygon points="110,20 102,36 118,36" fill="#e94560"/>
+            <!-- Beam wedge -->
+            <path d="M110,90 L60,170 A90,90 0 0,0 160,170 Z" fill="#e94560" fill-opacity=".08" stroke="#e94560" stroke-width="1" stroke-dasharray="4,3"/>
+            <!-- Azimuth centre line -->
+            <line x1="110" y1="90" x2="110" y2="175" stroke="#e94560" stroke-width="1" stroke-dasharray="3,3" opacity=".5"/>
+            <!-- Sample dots -->
+            <circle cx="85" cy="140" r="5" fill="#3fb950"/>
+            <circle cx="110" cy="155" r="5" fill="#58a6ff"/>
+            <circle cx="132" cy="148" r="5" fill="#3fb950"/>
+            <circle cx="98" cy="162" r="5" fill="#ffa657"/>
+            <circle cx="120" cy="168" r="5" fill="#3fb950"/>
+            <!-- TA arcs -->
+            <path d="M80,105 A38,38 0 0,1 140,105" fill="none" stroke="#58a6ff" stroke-width="1" stroke-dasharray="3,2" opacity=".5"/>
+            <path d="M70,125 A54,54 0 0,1 150,125" fill="none" stroke="#8b949e" stroke-width="1" stroke-dasharray="3,2" opacity=".4"/>
+            <!-- Labels -->
+            <text x="112" y="118" font-size="9" fill="#58a6ff" opacity=".8">TA dist</text>
+            <text x="52" y="178" font-size="9" fill="#e94560" opacity=".8">± spread</text>
+            <text x="155" y="138" font-size="9" fill="#3fb950">samples</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 8 — Raster ═══ -->
+  <div class="slide" data-section="Raster">
+    <div class="slide-section">Raster</div>
+    <div class="slide-title">Raster Grid Aggregation</div>
+    <div class="slide-subtitle">Fixed geographic pixel grid — same mechanism as C-SW VDT raster output</div>
+    <div class="slide-body">
+      <div class="two-col">
+        <div>
+          <ul class="hlist">
+            <li>
+              <span class="hl-icon">🟦</span>
+              <span><strong>Fixed grid</strong> — pixel size configurable (default 50 m). Each pixel covers a fixed lat/lon cell regardless of sample density.</span>
+            </li>
+            <li>
+              <span class="hl-icon">📥</span>
+              <span><strong>Snap</strong> — every geolocated sample is snapped to the pixel it falls inside using floor division on lat/lon.</span>
+            </li>
+            <li>
+              <span class="hl-icon">📐</span>
+              <span><strong>Aggregate</strong> — all samples in a pixel are combined: <code>Median</code> (default), <code>Average</code>, <code>Max</code>, or <code>Min</code>.</span>
+            </li>
+            <li>
+              <span class="hl-icon">🎨</span>
+              <span><strong>Color</strong> — pixel value mapped to 3GPP-standard RSRP/RSRQ/SINR color bins from the legend.</span>
+            </li>
+          </ul>
+        </div>
+        <div>
+          <div class="diag-box" style="margin-bottom:12px">
+            <div class="db-title" style="color:#58a6ff">Pixel Color Scale</div>
+            <div class="color-strip">
+              <div class="cs-seg" style="background:#e94560">&lt;−110</div>
+              <div class="cs-seg" style="background:#ff7b72">−110</div>
+              <div class="cs-seg" style="background:#ffa657">−105</div>
+              <div class="cs-seg" style="background:#e3b341">−100</div>
+              <div class="cs-seg" style="background:#3fb950">−95</div>
+              <div class="cs-seg" style="background:#58a6ff">−90</div>
+              <div class="cs-seg" style="background:#a5d6ff">−80</div>
+              <div class="cs-seg" style="background:#f0f6fc">&gt;−75</div>
+            </div>
+            <p style="font-size:.7rem;color:#8b949e">RSRP bins (dBm) — aligned to 3GPP TS 36.133 quality classes</p>
+          </div>
+          <div class="diag-box">
+            <div class="db-title" style="color:#3fb950">Legend Panel</div>
+            <p>Shows per-bin sample count and percentage. Example:<br>
+            <code style="color:#3fb950">−95 to −90 dBm &nbsp; 312 (18%)</code><br>
+            P5 / Median / P95 percentiles + total n displayed below bins.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 9 — Viz modes ═══ -->
+  <div class="slide" data-section="Visualization">
+    <div class="slide-section">Visualization</div>
+    <div class="slide-title">Visualization Modes</div>
+    <div class="slide-subtitle">Switch between modes without re-processing data</div>
+    <div class="slide-body">
+      <div class="cards cols-2">
+        <div class="card">
+          <div class="card-icon">🟦</div>
+          <div class="card-title">Raster (default)</div>
+          <p>Fixed-grid pixels colored by aggregate metric value. Each pixel = median/avg/max of all samples inside it. Overlapping samples correctly merge. Best for coverage analysis.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">⚫</div>
+          <div class="card-title">Dots</div>
+          <p>One colored circle per sample. Shows raw sample density and distribution. Useful for verifying geolocation placement and checking individual event positions.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🌡️</div>
+          <div class="card-title">Heatmap</div>
+          <p>Leaflet-heat kernel density heatmap. Gradient matches metric bins. Smoothed view for identifying coverage holes and strong-signal clusters.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🔵</div>
+          <div class="card-title">Cluster</div>
+          <p>Marker clusters that expand on zoom. Useful for very dense datasets to avoid overdraw. Shows event count per cluster bubble.</p>
+        </div>
+      </div>
+      <div style="margin-top:14px" class="cards cols-3">
+        <div class="card" style="padding:12px 16px">
+          <div class="card-title">Overlays</div>
+          <p>GPS track · eNB site markers · Sector wedge polygons · Event markers (HO, RLF, A3/A5)</p>
+        </div>
+        <div class="card" style="padding:12px 16px">
+          <div class="card-title">Metric Selector</div>
+          <p>RSRP Serving · RSRP Meas Report · RSRQ · SINR · DL Throughput</p>
+        </div>
+        <div class="card" style="padding:12px 16px">
+          <div class="card-title">Filters</div>
+          <p>Time range · Cell ID · RSRP threshold · Event type toggle · Live re-render on change</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 10 — KPIs ═══ -->
+  <div class="slide" data-section="KPIs">
+    <div class="slide-section">KPIs</div>
+    <div class="slide-title">KPI &amp; Analytics Panels</div>
+    <div class="slide-subtitle">Computed from the currently filtered sample set in real-time</div>
+    <div class="slide-body">
+      <div class="cards cols-2">
+        <div class="card">
+          <div class="card-title">Summary KPI Panel</div>
+          <p>
+            • <strong>HO Success Rate</strong> = successful HOs / attempts<br>
+            • <strong>RLF Rate / 10k samples</strong><br>
+            • <strong>SCG Failures</strong> (NR secondary cell group)<br>
+            • <strong>RSRP P5 / P50 / P95</strong> with color coding<br>
+            • <strong>RSRQ / SINR percentiles</strong><br>
+            • <strong>DL Throughput P50</strong>
+          </p>
+        </div>
+        <div class="card">
+          <div class="card-title">Per-Cell Table</div>
+          <p>
+            • One row per cell ID<br>
+            • Sample count, RSRP median, RSRQ median, SINR median<br>
+            • HO SR and RLF count per cell<br>
+            • Sortable by any column<br>
+            • Highlights worst-performing cells in red
+          </p>
+        </div>
+      </div>
+      <div style="margin-top:14px" class="cards cols-2">
+        <div class="card">
+          <div class="card-title">Timeline Chart (Plotly)</div>
+          <p>Time-series of RSRP + SINR for filtered samples. Dual Y-axis. Decimated to ≤5000 points for performance. Zoom/pan enabled. Shows HO/RLF event markers on timeline.</p>
+        </div>
+        <div class="card">
+          <div class="card-title">Tooltip (hover)</div>
+          <p>Per-sample: UTC timestamp, RSRP(srv) + RSRP(meas) when both available, RSRQ, SINR, CQI, Cell ID, PCI, event type. Appears on hover in any viz mode.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 11 — Geo params ═══ -->
+  <div class="slide" data-section="Configuration">
+    <div class="slide-section">Configuration</div>
+    <div class="slide-title">Geolocation Parameters</div>
+    <div class="slide-subtitle">All parameters trigger a full re-geolocation from raw samples on Apply</div>
+    <div class="slide-body">
+      <table>
+        <thead>
+          <tr><th>Parameter</th><th>Default</th><th>Effect</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Pixel Size</strong></td>
+            <td>50 m</td>
+            <td>Geographic grid cell size. Smaller = finer raster but more pixels. Larger = smoother, fewer pixels.</td>
+          </tr>
+          <tr>
+            <td><strong>Min RSRP</strong></td>
+            <td>−115 dBm</td>
+            <td>Samples below this RSRP threshold are excluded from geolocation (likely noise/interference).</td>
+          </tr>
+          <tr>
+            <td><strong>TA Min Distance</strong></td>
+            <td>0 m</td>
+            <td>Minimum TA-derived distance. Samples with TA below this are dropped (filters indoor/very-near UEs).</td>
+          </tr>
+          <tr>
+            <td><strong>TA Max Distance</strong></td>
+            <td>2500 m</td>
+            <td>Maximum TA-derived distance cap. Filters far-reaching/erroneous TA values.</td>
+          </tr>
+          <tr>
+            <td><strong>Sector Spread</strong></td>
+            <td>30°</td>
+            <td>Half-angle of beam spread (±degrees from azimuth). Each sample gets a unique angle via RNTI ⊕ time-bucket hash.</td>
+          </tr>
+          <tr>
+            <td><strong>Aggregation</strong></td>
+            <td>Median</td>
+            <td>Per-pixel aggregation function: Median / Average / Max / Min.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 12 — Sector spread ═══ -->
+  <div class="slide" data-section="Geolocation">
+    <div class="slide-section">Geolocation</div>
+    <div class="slide-title">Sector Spread Seeding</div>
+    <div class="slide-subtitle">Why RNTI alone fails — and the fix</div>
+    <div class="slide-body">
+      <div class="two-col">
+        <div>
+          <div class="diag-box accent" style="margin-bottom:12px">
+            <div class="db-title">❌ Problem: RNTI-only seed</div>
+            <p>If spread angle = <code>hash(RNTI)</code> only, every sample from the same UE session lands on the same ray. Creates radial streaks instead of a distributed raster — visually wrong and statistically wrong.</p>
+          </div>
+          <div class="diag-box green">
+            <div class="db-title">✅ Fix: RNTI ⊕ time-bucket</div>
+            <p>Each 5-second window produces a different angle offset for the same RNTI. Samples from the same UE fan out across the beam over time — matching how the UE physically moves within the sector coverage area.</p>
+          </div>
+        </div>
+        <div>
+          <div class="code-block">
+<span class="cm">// 5-second time bucket</span>
+<span class="kw">const</span> tBucket = (
+  Math.floor(ts / <span class="num">5000</span>)
+  * <span class="num">0x85EBCA77</span>
+) >>> <span class="num">0</span>;
+
+<span class="cm">// RNTI identity hash</span>
+<span class="kw">const</span> rntiHash = Math.<span class="fn">imul</span>(
+  rnti, <span class="num">0x9E3779B9</span>
+) >>> <span class="num">0</span>;
+
+<span class="cm">// Combined seed</span>
+<span class="kw">const</span> h = (rntiHash ^ tBucket) >>> <span class="num">0</span>;
+
+<span class="cm">// Angle within ±beamSpread</span>
+<span class="kw">const</span> frac = ((Math.<span class="fn">imul</span>(
+  h, <span class="num">1664525</span>) + <span class="num">1013904223</span>
+) >>> <span class="num">0</span>) / <span class="num">4294967296</span>;
+
+<span class="kw">const</span> angle = cell.az
+  + (frac - <span class="num">0.5</span>) * spread * <span class="num">2</span>;
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 13 — Export ═══ -->
+  <div class="slide" data-section="Export">
+    <div class="slide-section">Export</div>
+    <div class="slide-title">Export Options</div>
+    <div class="slide-subtitle">All exports respect current filter state</div>
+    <div class="slide-body">
+      <div class="cards cols-3">
+        <div class="card">
+          <div class="card-icon">📄</div>
+          <div class="card-title">CSV</div>
+          <p>All filtered samples with full field set: timestamp, cell_id, lat/lon, rsrp_dbm, meas_rsrp_dbm, rsrq_db, sinr_db, ta_us, event_type, source_file.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🌐</div>
+          <div class="card-title">GeoJSON</div>
+          <p>FeatureCollection with one Point feature per sample. All metric properties included. Compatible with QGIS, Mapbox, Leaflet, ArcGIS.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🌍</div>
+          <div class="card-title">KMZ</div>
+          <p>Google Earth package with colored placemarks per sample, eNB site markers, sector wedge polygons, and GPS track overlay.</p>
+        </div>
+      </div>
+      <div style="margin-top:18px" class="diag-box">
+        <div class="db-title" style="color:#58a6ff">Raster Export</div>
+        <p>The raster view can also be exported as a georeferenced PNG + world file for loading into GIS tools as a map overlay. Pixel values reflect the aggregated metric per grid cell.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ SLIDE 14 — Summary ═══ -->
+  <div class="slide" data-section="Summary">
+    <div class="slide-section">Summary</div>
+    <div class="slide-title">Key Design Decisions</div>
+    <div class="slide-subtitle">What makes this tool match C-SW VDT behaviour</div>
+    <div class="slide-body">
+      <ul class="hlist">
+        <li>
+          <span class="hl-icon">✅</span>
+          <span><strong>Per-sample placement, not triangulation.</strong> C-SW VDT places each sample independently at (cell + TA + azimuth). No cross-cell centroid, no RNTI windowing. This tool replicates that exactly.</span>
+        </li>
+        <li>
+          <span class="hl-icon">✅</span>
+          <span><strong>Separated RSRP fields.</strong> <code>rsrp_dbm</code> (0x49) = unbiased serving-cell RSRP for coverage maps. <code>meas_rsrp_dbm</code> (0x0b) = triggered/neighbour RSRP for mobility analysis. Never mixed.</span>
+        </li>
+        <li>
+          <span class="hl-icon">✅</span>
+          <span><strong>TA-first distance.</strong> When 0x10 TA is available (±2 s propagation, 99% hit rate in dense files), it overrides RSRP path-loss fallback for much more accurate radial distance.</span>
+        </li>
+        <li>
+          <span class="hl-icon">✅</span>
+          <span><strong>Fixed geographic raster.</strong> Pixels are grid cells, not RNTI groups. Multiple samples in the same pixel → single aggregated value (median/avg/max). Matches C-SW raster pixel semantics.</span>
+        </li>
+        <li>
+          <span class="hl-icon">✅</span>
+          <span><strong>Single HTML file.</strong> Zero dependencies to install. Open in any browser. All parsing, geolocation, and rendering runs entirely client-side in JavaScript.</span>
+        </li>
+      </ul>
+    </div>
+  </div>
+
+</div><!-- #deck -->
+
+<!-- Navigation -->
+<div id="nav">
+  <button id="btn-prev" onclick="go(-1)">&#8592;</button>
+  <div class="dots" id="dots"></div>
+  <span id="slide-counter"></span>
+  <button id="btn-next" onclick="go(1)">&#8594;</button>
+</div>
+
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  let cur = 0;
+
+  function buildDots() {
+    const c = document.getElementById('dots');
+    c.innerHTML = '';
+    slides.forEach((_, i) => {
+      const d = document.createElement('div');
+      d.className = 'dot' + (i === cur ? ' on' : '');
+      d.onclick = () => goTo(i);
+      c.appendChild(d);
+    });
+  }
+
+  function goTo(n) {
+    if (n < 0 || n >= slides.length) return;
+    slides[cur].classList.remove('active');
+    slides[cur].classList.add('exit');
+    setTimeout(() => slides[cur].classList.remove('exit'), 400);
+    cur = n;
+    slides[cur].classList.add('active');
+    document.getElementById('progress').style.width =
+      ((cur + 1) / slides.length * 100) + '%';
+    document.getElementById('slide-counter').textContent =
+      (cur + 1) + ' / ' + slides.length;
+    document.getElementById('slide-label').textContent =
+      (cur + 1) + ' / ' + slides.length;
+    document.getElementById('btn-prev').disabled = cur === 0;
+    document.getElementById('btn-next').disabled = cur === slides.length - 1;
+    buildDots();
+  }
+
+  function go(d) { goTo(cur + d); }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') go(1);
+    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   go(-1);
+    if (e.key === 'Home') goTo(0);
+    if (e.key === 'End')  goTo(slides.length - 1);
+  });
+
+  // Touch swipe
+  let tx = 0;
+  document.addEventListener('touchstart', e => { tx = e.touches[0].clientX; });
+  document.addEventListener('touchend',   e => {
+    const dx = e.changedTouches[0].clientX - tx;
+    if (Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+  });
+
+  goTo(0);
+</script>
+</body>
+</html>
